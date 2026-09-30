@@ -1,6 +1,6 @@
 #!/bin/bash
 # zopguard —— ZopToken 自愈守护 v1.18（通用版）
-# zopguard-version: 1.21
+# zopguard-version: 1.22
 # 每 3 分钟由 launchd 调用：
 #   · 检测 ZopToken 进程，异常时自动「退出→重开」
 #   · v1.2 平台判据：进程活着但平台侧状态异常（假活/掉线）也会自动修复
@@ -247,6 +247,11 @@ esc2() { # 文本 → 双层 JSON 转义（app 模式用：content 是二次 JSO
 }
 notify() { # $1 = 消息文本（单行）
   local text="$1" tt resp body
+  # v1.22：客户群机器人安全设置关键词「ZopToken」——消息不含它会被拦；统一在末尾附上（已有则不动）
+  case "$text" in
+    *ZopToken*) ;;
+    *) text="$text [ZopToken]" ;;
+  esac
   [ "${ZOPGUARD_DRY:-0}" = "1" ] && { log "notify(dry): $text"; echo "[dry] $text"; return 0; }
   if [ "$NOTIFY_TYPE" = "feishu_webhook" ]; then
     [ -z "${FEISHU_WEBHOOK_URL:-}" ] && { log "notify: 未配置 FEISHU_WEBHOOK_URL"; return 1; }
@@ -550,7 +555,7 @@ check_and_repair() {
 
 # ---------- 自检（部署时跑一次） ----------
 selftest() {
-  echo "== zopguard 自检 v1.21 =="
+  echo "== zopguard 自检 v1.22 =="
   echo "机器名: $MACHINE_NAME"
   echo "每日修复上限: $DAILY_MAX 次 / 冷却 ${COOLDOWN_SEC}s"
   if pgrep -x "$APP" >/dev/null 2>&1; then
@@ -565,7 +570,7 @@ selftest() {
   echo "授权: $([ -f "$LIC" ] && echo "客户机（$(check_license)）" || echo "自用版（无限期）")"
   echo "launchd: $(launchctl list 2>/dev/null | grep -qi zopguard && echo '已加载 ✓' || echo '未加载')"
   echo "日志: $LOG"
-  notify "🟢 [$MACHINE_NAME] zopguard 自愈守护 v1.21 已部署：进程掉线/平台假活自动「退出重开」，登录态掉线自动「API 直登恢复」，版本升级自动「自更新」，全过程汇报到本渠道。"
+  notify "🟢 [$MACHINE_NAME] zopguard 自愈守护 v1.22 已部署：进程掉线/平台假活自动「退出重开」，登录态掉线自动「API 直登恢复」，版本升级自动「自更新」，全过程汇报到本渠道。"
   echo "（自检消息已发送，请确认收到）"
 }
 
