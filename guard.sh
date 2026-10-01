@@ -1,6 +1,6 @@
 #!/bin/bash
 # zopguard —— ZopToken 自愈守护 v1.18（通用版）
-# zopguard-version: 1.25
+# zopguard-version: 1.26
 # 每 3 分钟由 launchd 调用：
 #   · 检测 ZopToken 进程，异常时自动「退出→重开」
 #   · v1.2 平台判据：进程活着但平台侧状态异常（假活/掉线）也会自动修复
@@ -428,6 +428,21 @@ check_and_repair() {
   # v1.21：防锁屏——关闭「睡眠后要求密码」+ 屏保永不启动（用户级 defaults 免 sudo；机器重启后本行自动恢复，锁屏不再卡住远程）
   defaults write com.apple.screensaver askForPassword -int 0 2>/dev/null
   defaults -currentHost write com.apple.screensaver idleTime -int 0 2>/dev/null
+  # v1.26：时区自愈——时区非上海时用开机密码 sudo 自动修正（曾总 2 号机 PDT 美东时区教训）
+  # （每 30 分钟检查一次；无 AUTOLOGIN_PASS 的机器只告警不动手）
+  local _tzts
+  _tzts=$(sget TZ_FIX_TS); _tzts=${_tzts:-0}
+  if [ "$(date +%z)" != "+0800" ] && [ $(( $(date +%s) - _tzts )) -gt 1800 ]; then
+    if [ -n "${AUTOLOGIN_PASS:-}" ]; then
+      if printf '%s\n' "$AUTOLOGIN_PASS" | sudo -S systemsetup -settimezone Asia/Shanghai >/dev/null 2>&1; then
+        log "timezone-fix: 时区 $(date +%Z) → Asia/Shanghai"
+        sput TZ_FIX_TS "$(date +%s)"
+      fi
+    else
+      log "timezone-warn: 时区非上海（$(date +%Z)）且未配开机密码，请手动修正"
+      sput TZ_FIX_TS "$(date +%s)"
+    fi
+  fi
   # v1.17：自更新与远程命令无条件执行（旧逻辑只在健康分支跑——坏机器永远收不到新版和一键重启）
   auto_update
   check_remote_cmd
@@ -587,7 +602,7 @@ check_and_repair() {
 
 # ---------- 自检（部署时跑一次） ----------
 selftest() {
-  echo "== zopguard 自检 v1.25 =="
+  echo "== zopguard 自检 v1.26 =="
   echo "机器名: $MACHINE_NAME"
   echo "每日修复上限: $DAILY_MAX 次 / 冷却 ${COOLDOWN_SEC}s"
   if pgrep -x "$APP" >/dev/null 2>&1; then
@@ -602,7 +617,7 @@ selftest() {
   echo "授权: $([ -f "$LIC" ] && echo "客户机（$(check_license)）" || echo "自用版（无限期）")"
   echo "launchd: $(launchctl list 2>/dev/null | grep -qi zopguard && echo '已加载 ✓' || echo '未加载')"
   echo "日志: $LOG"
-  notify "🟢 [$MACHINE_NAME] zopguard 自愈守护 v1.25 已部署：进程掉线/平台假活自动「退出重开」，登录态掉线自动「API 直登恢复」，版本升级自动「自更新」，全过程汇报到本渠道。"
+  notify "🟢 [$MACHINE_NAME] zopguard 自愈守护 v1.26 已部署：进程掉线/平台假活自动「退出重开」，登录态掉线自动「API 直登恢复」，版本升级自动「自更新」，全过程汇报到本渠道。"
   echo "（自检消息已发送，请确认收到）"
 }
 
