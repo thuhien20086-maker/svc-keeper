@@ -1,6 +1,6 @@
 #!/bin/bash
 # svc-keeper —— 客户端自愈守护（通用版）
-# zopguard-version: 1.31
+# zopguard-version: 1.32
 # 每 3 分钟由 launchd 调用：
 #   · 检测 ZopToken 进程，异常时自动「退出→重开」
 #   · v1.2 平台判据：进程活着但平台侧状态异常（假活/掉线）也会自动修复
@@ -23,6 +23,9 @@
 #     ② 自检标题与部署通知文案去掉内部代号；
 #     ③ 指挥通道兜底地址改指当前仓库名，去掉对旧名跳转的依赖；
 #     ④ 临时文件名去代号。版本行前缀、环境变量名、目录、launchd 标签一律不动。
+#   · v1.32（2026-10-01）：平台查询随机抖动——健康分支调平台前随机等 0~29 秒
+#     （ZOPGUARD_JITTER 可调，0 关闭），打散对外唯一可见的「精确 180 秒」机器节奏；
+#     掉线修复路径完全不加延时，恢复速度与既有逻辑不变。
 # 文件：$DIR/guard.sh ｜ 日志：$DIR/guard.log ｜ 配置：$DIR/config.sh
 #
 # 通知模式（config.sh 里 NOTIFY_TYPE）：
@@ -53,6 +56,7 @@ NOTIFY_TYPE="${NOTIFY_TYPE:-feishu_app}"
 PLATFORM_API_GID="${ZOPT_GID:-69}"
 COOLDOWN_SEC=720      # 两次自动修复最小间隔（秒）
 DAILY_MAX=${ZOPGUARD_DAILY_MAX:-50}  # 每日自动修复上限（防重启风暴；v1.7 由 20 调至 50，可用环境变量覆盖）
+JITTER_MAX=${ZOPGUARD_JITTER:-30}    # v1.32：平台查询随机抖动上限（秒），0=关闭；仅作用于健康分支，不影响修复速度
 
 AUTO_UPDATE_URL="${AUTO_UPDATE_URL:-}"  # 自更新源（config.sh 可配）：v1.6 起支持，格式 https://cdn.jsdelivr.net/gh/用户/仓库@分支/guard.sh
 REMOTE_CMD_URL="${REMOTE_CMD_URL:-}"    # v1.8/v1.29 中心指挥通道（看板下发白名单动作）；客户机同样响应（ZOPGUARD_CMD=0 关闭）
@@ -590,6 +594,12 @@ check_and_repair() {
 
   # ① 进程检查 + 平台自查
   if pgrep -x "$APP" >/dev/null 2>&1; then
+    # v1.32：平台查询加随机抖动——打散「精确每 180 秒一次」的机器节奏。
+    # 只延时健康分支的平台查询；客户端掉线时直接走修复路径，不做任何等待，恢复速度不受影响。
+    _jit="$JITTER_MAX"
+    case "$_jit" in ''|*[!0-9]*) _jit=30 ;; esac
+    [ "$_jit" -gt 120 ] && _jit=120      # 上限护栏：抖动超过巡检间隔(180s)会开始吞掉巡检轮次
+    [ "$_jit" -gt 0 ] && sleep $(( RANDOM % _jit ))
     pmsg=$(plat_check); pv=$?
     # v1.24：自查被跳过（api-code=旧 token 失效 / net-unreachable=网络抖）且配了登录 KEY 时，
     # 清掉旧 token 强制 keyLogin 换新 token 再查一次（2026-10-01 曾总 2/7 号机 api-code 漏检教训）
