@@ -1,6 +1,6 @@
 #!/bin/bash
-# zopguard —— ZopToken 自愈守护 v1.18（通用版）
-# zopguard-version: 1.28
+# zopguard —— ZopToken 自愈守护（通用版）
+# zopguard-version: 1.29
 # 每 3 分钟由 launchd 调用：
 #   · 检测 ZopToken 进程，异常时自动「退出→重开」
 #   · v1.2 平台判据：进程活着但平台侧状态异常（假活/掉线）也会自动修复
@@ -11,6 +11,10 @@
 #     杜绝「假修复」；③ ioreg 前加 LC_ALL=C 消 stderr 噪音
 #   · v1.9（2026-09-19）：每日一次「深度重启」——借当天首次掉线窗口，
 #     彻底断开旧 TCP 连接（多等 8 秒）再重开客户端；当天不掉线则不触发
+#   · v1.29（2026-10-01）：远程指挥通道——看板对任意机器下发白名单动作
+#     （ping 测通知 / diag 远程诊断 / restart 重启客户端 / relogin 重登 /
+#     update 强制更新 / reboot 整机重启），每个动作结果实时飞书回传；
+#     客户机同样响应（config.sh 里 ZOPGUARD_CMD=0 可关闭）
 # 文件：~/zopguard/guard.sh ｜ 日志：~/zopguard/guard.log ｜ 配置：~/zopguard/config.sh
 #
 # 通知模式（config.sh 里 NOTIFY_TYPE）：
@@ -43,42 +47,111 @@ COOLDOWN_SEC=720      # 两次自动修复最小间隔（秒）
 DAILY_MAX=${ZOPGUARD_DAILY_MAX:-50}  # 每日自动修复上限（防重启风暴；v1.7 由 20 调至 50，可用环境变量覆盖）
 
 AUTO_UPDATE_URL="${AUTO_UPDATE_URL:-}"  # 自更新源（config.sh 可配）：v1.6 起支持，格式 https://cdn.jsdelivr.net/gh/用户/仓库@分支/guard.sh
-REMOTE_CMD_URL="${REMOTE_CMD_URL:-}"    # v1.8 中心命令文件（看板「一键重启」用）；仅自用机响应（有 license 的客户机不响应）
+REMOTE_CMD_URL="${REMOTE_CMD_URL:-}"    # v1.8/v1.29 中心指挥通道（看板下发白名单动作）；客户机同样响应（ZOPGUARD_CMD=0 关闭）
 LIC="$DIR/license"                      # v1.7 授权文件：客户名|到期时间戳|HMAC签名；不存在=自用版（无限期）
 
-# ---------- v1.8：中心远程重启命令（看板一键重启 → GitHub cmd/reboot.txt → 机端 3 分钟内执行） ----------
+# ---------- v1.8/v1.29：中心远程指挥通道（看板 → GitHub cmd/reboot.txt → 机端 3 分钟内执行 → 飞书回传） ----------
+# 文件格式：每行一条命令 `<ts>|<target>|<action>`（多行，看板保留最近 20 条，行序 ts 递增）
+#   ts=unix 秒；target=all 或机器名；action ∈ ping/diag/restart/relogin/update/reboot
+#   （白名单固定动作，绝不执行任意 shell——仓库公开，防账号被盗时的任意执行面）
+# 兼容旧两段格式 `<ts>|<target>`（=reboot）。CMD_TS=已处理的最大 ts（执行前记账，幂等防重复）。
 check_remote_cmd() {
   [ -z "$REMOTE_CMD_URL" ] && return 0
-  [ -f "$LIC" ] && return 0          # 客户机不响应中心命令
-  local body ts target
-  body=$(curl -m 15 -sf "$REMOTE_CMD_URL" 2>/dev/null)
+  [ "${ZOPGUARD_CMD:-1}" = "0" ] && return 0     # v1.29：客户机可用 ZOPGUARD_CMD=0 关闭指挥通道
+  local body line ts target action last n now
+  body=$(curl -m 20 -sf "$REMOTE_CMD_URL" 2>/dev/null)
   [ -z "$body" ] && {
-    body=$(curl -m 15 -sf "https://raw.githubusercontent.com/thuhien20086-maker/zopguard/main/cmd/reboot.txt" 2>/dev/null)
+    body=$(curl -m 20 -sf "https://raw.githubusercontent.com/thuhien20086-maker/zopguard/main/cmd/reboot.txt" 2>/dev/null)
   }
   [ -z "$body" ] && return 0
-  ts=$(echo "$body" | cut -d'|' -f1 | tr -d '[:space:]')
-  target=$(echo "$body" | cut -d'|' -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')  # v1.10：只去首尾，保留机器名内部空格
-  case "$ts" in *[!0-9]*|"") return 0 ;; esac
-  local last
   last=$(sget CMD_TS); last=${last:-0}
-  [ "$ts" -le "$last" ] 2>/dev/null && return 0
-  if [ "$target" = "all" ] || echo ",$target," | grep -Fq ",$MACHINE_NAME,"; then
-    sput CMD_TS "$ts"
-    log "remote-cmd: 收到重启指令（${ts}），60 秒后重启"
-    notify "🔁 [$MACHINE_NAME] 收到看板远程重启指令，60 秒后自动重启。"
-    # v1.28：同步执行 + 系统层延时（shutdown -r +1）——原「( sleep 60; ... ) &」子壳会被
-    # launchd 作业退出时的进程组清理 SIGKILL（2026-10-01 实测复现，三处延时重启从未执行过）。
-    # shutdown -r +1 的定时器在系统层，不受作业清理影响。
-    if [ -n "${AUTOLOGIN_PASS:-}" ]; then
-      if ! printf '%s\n' "$AUTOLOGIN_PASS" | sudo -S shutdown -r +1 2>/dev/null; then
-        log "remote-cmd: sudo 重启失败，退回 osascript"
-        notify "⚠️ [$MACHINE_NAME] 远程重启 sudo 失败（密码失效？），已尝试 GUI 方式重启。"
-        osascript -e 'tell app "System Events" to restart' 2>/dev/null
-      fi
-    else
-      osascript -e 'tell app "System Events" to restart' 2>/dev/null || notify "⚠️ [$MACHINE_NAME] 远程重启失败（无密码且 GUI 未授权），请人工重启。"
+  now=$(date +%s)
+  n=0
+  while IFS= read -r line; do
+    n=$((n+1)); [ "$n" -gt 80 ] && break
+    [ -z "$line" ] && continue
+    ts=$(printf '%s' "$line" | cut -d'|' -f1 | tr -d '[:space:]')
+    target=$(printf '%s' "$line" | cut -d'|' -f2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')  # 只去首尾，保留名字内部空格
+    action=$(printf '%s' "$line" | cut -d'|' -f3 | tr -d '[:space:]')
+    [ -z "$action" ] && action="reboot"          # 旧两段格式兼容
+    case "$ts" in *[!0-9]*|"") continue ;; esac
+    [ ${#ts} -gt 12 ] && continue                # v1.29：位数上限——超 int64 的 ts 让比较报错失效→每轮重复执行
+    [ "$ts" -gt $(( now + 300 )) ] && continue   # v1.29：拒绝未来时间戳（防 CMD_TS 被毒化为未来→后续命令全被水位静默丢弃）
+    [ "$ts" -lt $(( now - 3600 )) ] && continue  # v1.29：过期拒绝（原 $(( date - ts )) 对前导零 ts 会算术报错中止整轮）
+    [ "$ts" -le "$last" ] 2>/dev/null && continue
+    if [ "$target" = "all" ] || [ "$target" = "$MACHINE_NAME" ]; then
+      case "$action" in ping|diag|restart|relogin|update|reboot) ;; *) log "remote-cmd: 未知动作 '$action'（ts=$ts）已忽略"; continue ;; esac
+      sput CMD_TS "$ts"; last=$ts                # 执行前记账（reboot/update 会终止本进程，防重复执行）
+      exec_remote_action "$action"
     fi
-  fi
+  done <<< "$body"
+}
+
+# ---------- v1.29：白名单动作执行器（看板远程指令；每个动作实时飞书回传） ----------
+exec_remote_action() {
+  local action="$1" t0 pst ver diag_plat _dl _cnt _lf i ok rl
+  t0=$(date '+%F %T')
+  log "remote-cmd: 执行远程动作 $action"
+  ver=$(grep -m1 '^# zopguard-version:' "$0" | awk '{print $NF}')
+  case "$action" in
+    ping)
+      notify "🏓 [$MACHINE_NAME] 通知链路测试：收到本条 = 本机飞书通知通道正常（v$ver，$t0）"
+      ;;
+    diag)
+      pgrep -x "$APP" >/dev/null 2>&1 && pst="客户端进程: 运行中" || pst="客户端进程: 未运行"
+      diag_plat=$(plat_check 2>/dev/null)
+      _cnt=$(sget COUNT); _cnt=${_cnt:-0}
+      _lf=$(sget LOGIN_FAIL_CNT); _lf=${_lf:-0}
+      _dl=$(tail -8 "$LOG" 2>/dev/null)
+      notify "📋 [$MACHINE_NAME] 远程诊断报告（v$ver，$t0）
+$pst ｜ 平台: $diag_plat
+今日修复 ${_cnt} 次 ｜ 连续失败 ${_lf} 次
+近日志:
+${_dl}"
+      ;;
+    restart)
+      rl=1
+      [ -n "${ZOPT_LOGIN_KEY:-}" ] && { api_relogin; rl=$?; }
+      pkill -x "$APP" 2>/dev/null; sleep 2; pkill -9 -x "$APP" 2>/dev/null; sleep 1
+      open "$APP_PATH" 2>>"$LOG" || open -b "com.zoptoken.-" 2>>"$LOG"
+      ok=0
+      for i in 1 2 3 4 5 6; do sleep 5; pgrep -x "$APP" >/dev/null 2>&1 && { ok=1; break; }; done
+      if [ "$ok" = "1" ]; then
+        notify "✅ [$MACHINE_NAME] 看板指令 restart 完成：客户端已重启$([ "$rl" = "0" ] && echo '，平台槽位已恢复')（$t0）"
+      else
+        notify "⚠️ [$MACHINE_NAME] 看板指令 restart：客户端重启后 30 秒未检测到进程，请关注（$t0）"
+      fi
+      ;;
+    relogin)
+      if api_relogin; then
+        notify "✅ [$MACHINE_NAME] 看板指令 relogin 完成：API 直登成功，平台槽位已重新挂载（$t0）"
+      else
+        notify "⚠️ [$MACHINE_NAME] 看板指令 relogin 失败：API 直登未成功（登录密钥失效或平台异常），详见机端日志（$t0）"
+      fi
+      ;;
+    update)
+      sput UPD_LAST_VER ""; sput UPD_CHK_TS 0
+      log "remote-cmd: 强制自更新检查"
+      auto_update
+      notify "ℹ️ [$MACHINE_NAME] 看板指令 update 执行完毕：已是最新版或无可用更新（异常详见机端日志）（$t0）"
+      ;;
+    reboot)
+      log "remote-cmd: 收到重启指令（$t0），60 秒后重启"
+      notify "🔁 [$MACHINE_NAME] 收到看板远程重启指令，60 秒后自动重启。"
+      # v1.28：同步执行 + 系统层延时（shutdown -r +1）——原「( sleep 60; ... ) &」子壳会被
+      # launchd 作业退出时的进程组清理 SIGKILL（2026-10-01 实测复现，三处延时重启从未执行过）。
+      # shutdown -r +1 的定时器在系统层，不受作业清理影响。
+      if [ -n "${AUTOLOGIN_PASS:-}" ]; then
+        if ! printf '%s\n' "$AUTOLOGIN_PASS" | sudo -S shutdown -r +1 2>/dev/null; then
+          log "remote-cmd: sudo 重启失败，退回 osascript"
+          notify "⚠️ [$MACHINE_NAME] 远程重启 sudo 失败（密码失效？），已尝试 GUI 方式重启。"
+          osascript -e 'tell app "System Events" to restart' 2>/dev/null
+        fi
+      else
+        osascript -e 'tell app "System Events" to restart' 2>/dev/null || notify "⚠️ [$MACHINE_NAME] 远程重启失败（无密码且 GUI 未授权），请人工重启。"
+      fi
+      ;;
+  esac
 }
 
 # ---------- v1.7：授权校验（license）+ 到期自毁 ----------
@@ -258,19 +331,25 @@ sput() { # key value
 }
 
 # ---------- 通知 ----------
-esc1() { # 文本 → 单层 JSON 转义（webhook 模式用）
+esc1() { # 文本 → 单层 JSON 转义（webhook 模式用；支持多行）
   local s="$1"
   s="${s//\\/\\\\}"
   s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/}"
+  s="${s//$'\t'/\\t}"
   printf '%s' "$s"
 }
-esc2() { # 文本 → 双层 JSON 转义（app 模式用：content 是二次 JSON 字符串）
+esc2() { # 文本 → 双层 JSON 转义（app 模式用：content 是二次 JSON 字符串；支持多行）
   local s="$1"
   s="${s//\\/\\\\\\\\}"
   s="${s//\"/\\\\\\\"}"
+  s="${s//$'\n'/\\\\n}"
+  s="${s//$'\r'/}"
+  s="${s//$'\t'/\\\\t}"
   printf '%s' "$s"
 }
-notify() { # $1 = 消息文本（单行）
+notify() { # $1 = 消息文本（可多行，逐行转义后进飞书）
   local text="$1" tt resp body
   # v1.22：客户群机器人安全设置关键词「ZopToken」——消息不含它会被拦；统一在末尾附上（已有则不动）
   case "$text" in
@@ -286,7 +365,7 @@ notify() { # $1 = 消息文本（单行）
       resp=$(curl -s -m 10 -X POST "$_wurl" -H "Content-Type: application/json" \
         --data "{\"msg_type\":\"text\",\"content\":{\"text\":\"$(esc1 "$text")\"}}")
       case "$resp" in
-        *'\"code\":0'*|*'\"StatusCode\":0'*) log "notify sent: $text" ;;
+        *'"code":0'*|*'"StatusCode":0'*) log "notify sent: $text" ;;
         *) log "notify fail: $resp" ;;
       esac
     done
@@ -665,6 +744,7 @@ selftest() {
   echo "登录密钥: $([ -n "${ZOPT_LOGIN_KEY:-}" ] && echo "已配置（${ZOPT_LOGIN_KEY:0:8}…）✓ 登出/槽位到期自动 API 直登恢复" || echo "未配置（登出后无法自动重登，请补 ZOPT_LOGIN_KEY）")"
   echo "平台自查: $(plat_check) (exit=$?)"
   echo "自更新: $([ -n "$AUTO_UPDATE_URL" ] && echo "已配置 ✓（$AUTO_UPDATE_URL）" || echo "未配置（升级需手动）")"
+  echo "指挥通道: $([ "${ZOPGUARD_CMD:-1}" = "0" ] && echo '已关闭（ZOPGUARD_CMD=0）' || echo '已启用（白名单: ping/diag/restart/relogin/update/reboot）')"
   echo "授权: $([ -f "$LIC" ] && echo "客户机（$(check_license)）" || echo "自用版（无限期）")"
   echo "launchd: $(launchctl list 2>/dev/null | grep -qi zopguard && echo '已加载 ✓' || echo '未加载')"
   echo "日志: $LOG"
