@@ -31,3 +31,4 @@
 1790850962|龙哥2的Mac mini|update
 1790850967|曾宇12号的Mac mini|update
 1790850973|曾宇10的Mac mini|update
+1790850978|曾宇9的Mac mini|update
