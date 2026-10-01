@@ -1,6 +1,6 @@
 #!/bin/bash
 # zopguard —— ZopToken 自愈守护 v1.18（通用版）
-# zopguard-version: 1.26
+# zopguard-version: 1.27
 # 每 3 分钟由 launchd 调用：
 #   · 检测 ZopToken 进程，异常时自动「退出→重开」
 #   · v1.2 平台判据：进程活着但平台侧状态异常（假活/掉线）也会自动修复
@@ -167,7 +167,7 @@ auto_update() {
     case "$remote_ver" in ''|*[!0-9.]*|*..*) remote_ver="";; esac
   }
   [ -z "$remote_ver" ] && return 0
-  local_ver=$(grep '^# zopguard-version:' "$0" 2>/dev/null | awk '{print $2}')
+  local_ver=$(grep '^# zopguard-version:' "$0" 2>/dev/null | awk '{print $NF}')
   [ "$remote_ver" = "$local_ver" ] && return 0
   # v1.13：只升不降 + 「已尝试版本」闸——用 awk 数值比较（POSIX 安全，老 macOS 无 sort -V）
   ver_cmp() { # 1=$1>$2 0=其他；按点分数字段逐段比较
@@ -192,7 +192,15 @@ auto_update() {
   [ -s "$tmp" ] || { rm -f "$tmp"; return 0; }
   head -1 "$tmp" | grep -q '^#!/bin/bash' || { rm -f "$tmp"; return 0; }
   bash -n "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
-  grep -q "^# zopguard-version: ${remote_ver}$" "$tmp" || { rm -f "$tmp"; return 0; }
+  # v1.27：不再要求「下载文件版本行 == VERSION 值」——CDN 两文件缓存不同步时该等式永远不成立，
+  # 自更新会永久死锁（2026-10-01 实测：VERSION 缓存卡 1.24 而 guard.sh 已刷 1.26，全机群升不动）。
+  # 改为：取下载文件实际版本行，格式合法且 dl_ver >= remote_ver 即接受，替换后按 dl_ver 记账。
+  dl_ver=$(grep -m1 '^# zopguard-version:' "$tmp" | awk '{print $NF}')
+  dl_ver=$(printf '%s' "$dl_ver" | sed -E 's/^[vV]//; s/[^0-9.].*$//')
+  case "$dl_ver" in ''|*[!0-9.]*|*..*) rm -f "$tmp"; return 0;; esac
+  if [ "$dl_ver" != "$remote_ver" ] && [ "$(ver_cmp "$dl_ver" "$remote_ver")" != "1" ]; then
+    rm -f "$tmp"; return 0
+  fi
   cp "$tmp" "$0.new" && mv "$0.new" "$0" && chmod +x "$0" && rm -f "$tmp"
   if [ -f "$tmp" ] || [ -f "$0.new" ]; then
     # v1.16：替换失败（cp/mv/chmod 任一环节断）→ 清残留 + 记日志，下轮重试；
@@ -201,9 +209,9 @@ auto_update() {
     log "auto-update: 替换失败，下轮重试"
     return 0
   fi
-  sput UPD_LAST_VER "$remote_ver"
-  log "auto-update: v$local_ver → v$remote_ver（下轮起生效，本轮 exit 释放锁）"
-  notify "🔄 [$MACHINE_NAME] 守护已自动升级 v$local_ver → v$remote_ver（下轮巡检起生效）。"
+  sput UPD_LAST_VER "$dl_ver"
+  log "auto-update: v$local_ver → v$dl_ver（下轮起生效，本轮 exit 释放锁）"
+  notify "🔄 [$MACHINE_NAME] 守护已自动升级 v$local_ver → v$dl_ver（下轮巡检起生效）。"
   # v1.10：不再 kickstart 自杀（SIGKILL 会让锁残留 30 分钟死窗）；下个 StartInterval 自然用新版本
   exit 0
 }
@@ -602,7 +610,8 @@ check_and_repair() {
 
 # ---------- 自检（部署时跑一次） ----------
 selftest() {
-  echo "== zopguard 自检 v1.26 =="
+  local v; v=$(grep -m1 '^# zopguard-version:' "$0" | awk '{print $NF}')
+  echo "== zopguard 自检 v$v =="
   echo "机器名: $MACHINE_NAME"
   echo "每日修复上限: $DAILY_MAX 次 / 冷却 ${COOLDOWN_SEC}s"
   if pgrep -x "$APP" >/dev/null 2>&1; then
@@ -617,7 +626,7 @@ selftest() {
   echo "授权: $([ -f "$LIC" ] && echo "客户机（$(check_license)）" || echo "自用版（无限期）")"
   echo "launchd: $(launchctl list 2>/dev/null | grep -qi zopguard && echo '已加载 ✓' || echo '未加载')"
   echo "日志: $LOG"
-  notify "🟢 [$MACHINE_NAME] zopguard 自愈守护 v1.26 已部署：进程掉线/平台假活自动「退出重开」，登录态掉线自动「API 直登恢复」，版本升级自动「自更新」，全过程汇报到本渠道。"
+  notify "🟢 [$MACHINE_NAME] zopguard 自愈守护 v$v 已部署：进程掉线/平台假活自动「退出重开」，登录态掉线自动「API 直登恢复」，版本升级自动「自更新」，全过程汇报到本渠道。"
   echo "（自检消息已发送，请确认收到）"
 }
 
