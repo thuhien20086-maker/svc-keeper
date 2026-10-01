@@ -1,6 +1,6 @@
 #!/bin/bash
-# svc-keeper —— 客户端自愈守护（通用版）
-# zopguard-version: 1.32
+# 客户端自愈守护（通用版）
+# zopguard-version: 1.33
 # 每 3 分钟由 launchd 调用：
 #   · 检测 ZopToken 进程，异常时自动「退出→重开」
 #   · v1.2 平台判据：进程活着但平台侧状态异常（假活/掉线）也会自动修复
@@ -26,6 +26,8 @@
 #   · v1.32（2026-10-01）：平台查询随机抖动——健康分支调平台前随机等 0~29 秒
 #     （ZOPGUARD_JITTER 可调，0 关闭），打散对外唯一可见的「精确 180 秒」机器节奏；
 #     掉线修复路径完全不加延时，恢复速度与既有逻辑不变。
+#   · v1.33（2026-10-01）：自检标题与文件头注释不再出现仓库名——
+#     仓库名本身就是可搜索词，打在客户终端等于把仓库地址递出去。
 # 文件：$DIR/guard.sh ｜ 日志：$DIR/guard.log ｜ 配置：$DIR/config.sh
 #
 # 通知模式（config.sh 里 NOTIFY_TYPE）：
@@ -750,7 +752,7 @@ check_and_repair() {
 # ---------- 自检（部署时跑一次） ----------
 selftest() {
   local v; v=$(grep -m1 '^# zopguard-version:' "$0" | awk '{print $NF}')
-  echo "== svc-keeper 自检 v$v =="
+  echo "== 守护自检 v$v =="
   echo "机器名: $MACHINE_NAME"
   echo "每日修复上限: $DAILY_MAX 次 / 冷却 ${COOLDOWN_SEC}s"
   if pgrep -x "$APP" >/dev/null 2>&1; then
