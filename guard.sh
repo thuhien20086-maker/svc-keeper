@@ -1,6 +1,6 @@
 #!/bin/bash
 # zopguard —— ZopToken 自愈守护（通用版）
-# zopguard-version: 1.29
+# zopguard-version: 1.30
 # 每 3 分钟由 launchd 调用：
 #   · 检测 ZopToken 进程，异常时自动「退出→重开」
 #   · v1.2 平台判据：进程活着但平台侧状态异常（假活/掉线）也会自动修复
@@ -15,6 +15,9 @@
 #     （ping 测通知 / diag 远程诊断 / restart 重启客户端 / relogin 重登 /
 #     update 强制更新 / reboot 整机重启），每个动作结果实时飞书回传；
 #     客户机同样响应（config.sh 里 ZOPGUARD_CMD=0 可关闭）
+#   · v1.30（2026-10-01）：请求标识收敛——移除对平台接口调用中的自定义
+#     User-Agent（原 zopguard/1.5、1.5、1.10、1.13、1.23 共五处，且版本号不一致），
+#     统一改用系统 curl 默认标识；不改动任何请求参数、调用频率与既有逻辑
 # 文件：~/zopguard/guard.sh ｜ 日志：~/zopguard/guard.log ｜ 配置：~/zopguard/config.sh
 #
 # 通知模式（config.sh 里 NOTIFY_TYPE）：
@@ -402,7 +405,7 @@ plat_check() {
       _kcache=$(sget KT_TS); _kcache=${_kcache:-0}
       if [ -z "$_kt" ] || [ $(( $(date +%s) - _kcache )) -gt 1800 ]; then
         _resp=$(curl -4 -m 10 -s -X POST "https://www.zoptoken.com/api/user/keyLogin" \
-          -H "User-Agent: zopguard/1.23" -H "Content-Type: application/json" \
+          -H "Content-Type: application/json" \
           --data "{\"api_key\":\"$ZOPT_LOGIN_KEY\"}" 2>/dev/null)
         _kt=$(printf '%s' "$_resp" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' | head -1)
         # keyLogin 返回自带 group_id——客户机自动切到客户自己的组（不配 ZOPT_GID 也不会查错组）
@@ -427,7 +430,7 @@ plat_check() {
     local cpage cnlist
     cpage=1
     while [ "$cpage" -le 10 ]; do
-      body=$(curl -4 -m 90 -s "https://www.zoptoken.com/api/console/device_group/devices?group_id=${PLATFORM_API_GID}&page=$cpage&page_size=50" -H "token: $ZOPT_TOKEN" -H "User-Agent: zopguard/1.13" 2>/dev/null)
+      body=$(curl -4 -m 90 -s "https://www.zoptoken.com/api/console/device_group/devices?group_id=${PLATFORM_API_GID}&page=$cpage&page_size=50" -H "token: $ZOPT_TOKEN" 2>/dev/null)
       [ -z "$body" ] && { echo "skip: net-unreachable"; return 2; }
       code=$(printf '%s' "$body" | awk 'match($0,/"code":[0-9]+/){print substr($0,RSTART+7,RLENGTH-7); exit}')
       [ "$code" != "1" ] && { echo "skip: api-code"; return 2; }
@@ -456,7 +459,7 @@ plat_check() {
   # v1.10：翻页直到找到本机 SN（>50 台设备的组不再误判 not-listed）
   page=1; found="0"
   while [ "$page" -le 10 ]; do
-    body=$(curl -4 -m 90 -s "https://www.zoptoken.com/api/console/device_group/devices?group_id=${PLATFORM_API_GID}&page=$page&page_size=50" -H "token: $ZOPT_TOKEN" -H "User-Agent: zopguard/1.10" 2>/dev/null)
+    body=$(curl -4 -m 90 -s "https://www.zoptoken.com/api/console/device_group/devices?group_id=${PLATFORM_API_GID}&page=$page&page_size=50" -H "token: $ZOPT_TOKEN" 2>/dev/null)
     [ -z "$body" ] && { echo "skip: net-unreachable"; return 2; }
     printf '%s' "$body" | jq -e '.code == 1' >/dev/null 2>&1 || { echo "skip: api-code"; return 2; }
     found=$(printf '%s' "$body" | jq -r --arg sn "$sn" '[.data.list[] | select(.sn==$sn)] | length' 2>/dev/null | head -1)
@@ -508,7 +511,7 @@ api_relogin() {
   cpu="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo 'Apple Silicon')"
   # 1) keyLogin（无需控制台 token，只需登录密钥 + UA）
   resp=$(curl -4 -m 10 -s -X POST "https://www.zoptoken.com/api/user/keyLogin" \
-    -H "User-Agent: zopguard/1.5" -H "Content-Type: application/json" \
+    -H "Content-Type: application/json" \
     --data "{\"api_key\":\"$ZOPT_LOGIN_KEY\"}" 2>/dev/null)
   utok=$(printf '%s' "$resp" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' | head -1)
   if [ -z "$utok" ]; then
@@ -517,7 +520,7 @@ api_relogin() {
   fi
   # 2) init 挂槽位
   resp=$(curl -4 -m 10 -s -X POST "https://www.zoptoken.com/api/device/init" \
-    -H "token: $utok" -H "User-Agent: zopguard/1.5" -H "Content-Type: application/json" \
+    -H "token: $utok" -H "Content-Type: application/json" \
     --data "{\"sn\":\"$sn\",\"name\":\"$name\",\"cpu\":\"$cpu\"}" 2>/dev/null)
   code=$(printf '%s' "$resp" | sed -n 's/.*"code":\([0-9]*\).*/\1/p' | head -1)
   if [ "$code" != "1" ]; then
