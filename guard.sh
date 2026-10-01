@@ -1,6 +1,6 @@
 #!/bin/bash
 # zopguard —— ZopToken 自愈守护 v1.18（通用版）
-# zopguard-version: 1.27
+# zopguard-version: 1.28
 # 每 3 分钟由 launchd 调用：
 #   · 检测 ZopToken 进程，异常时自动「退出→重开」
 #   · v1.2 平台判据：进程活着但平台侧状态异常（假活/掉线）也会自动修复
@@ -51,9 +51,9 @@ check_remote_cmd() {
   [ -z "$REMOTE_CMD_URL" ] && return 0
   [ -f "$LIC" ] && return 0          # 客户机不响应中心命令
   local body ts target
-  body=$(curl -m 15 -s "$REMOTE_CMD_URL" 2>/dev/null)
+  body=$(curl -m 15 -sf "$REMOTE_CMD_URL" 2>/dev/null)
   [ -z "$body" ] && {
-    body=$(curl -m 15 -s "https://raw.githubusercontent.com/thuhien20086-maker/zopguard/main/cmd/reboot.txt" 2>/dev/null)
+    body=$(curl -m 15 -sf "https://raw.githubusercontent.com/thuhien20086-maker/zopguard/main/cmd/reboot.txt" 2>/dev/null)
   }
   [ -z "$body" ] && return 0
   ts=$(echo "$body" | cut -d'|' -f1 | tr -d '[:space:]')
@@ -66,18 +66,18 @@ check_remote_cmd() {
     sput CMD_TS "$ts"
     log "remote-cmd: 收到重启指令（${ts}），60 秒后重启"
     notify "🔁 [$MACHINE_NAME] 收到看板远程重启指令，60 秒后自动重启。"
-    # 优先 sudo shutdown（launchd 会话下可靠）；AUTOLOGIN_PASS 没进 config 时退回 osascript（GUI 会话）
-    ( trap - EXIT   # v1.13：清除继承的锁释放 trap，防误删活锁
-      sleep 60
-      if [ -n "${AUTOLOGIN_PASS:-}" ]; then
-        if ! printf '%s\n' "$AUTOLOGIN_PASS" | sudo -S shutdown -r now 2>/dev/null; then
-          log "remote-cmd: sudo 重启失败，退回 osascript"
-          notify "⚠️ [$MACHINE_NAME] 远程重启 sudo 失败（密码失效？），已尝试 GUI 方式重启。"
-          osascript -e 'tell app "System Events" to restart' 2>/dev/null
-        fi
-      else
-        osascript -e 'tell app "System Events" to restart' 2>/dev/null || notify "⚠️ [$MACHINE_NAME] 远程重启失败（无密码且 GUI 未授权），请人工重启。"
-      fi ) &
+    # v1.28：同步执行 + 系统层延时（shutdown -r +1）——原「( sleep 60; ... ) &」子壳会被
+    # launchd 作业退出时的进程组清理 SIGKILL（2026-10-01 实测复现，三处延时重启从未执行过）。
+    # shutdown -r +1 的定时器在系统层，不受作业清理影响。
+    if [ -n "${AUTOLOGIN_PASS:-}" ]; then
+      if ! printf '%s\n' "$AUTOLOGIN_PASS" | sudo -S shutdown -r +1 2>/dev/null; then
+        log "remote-cmd: sudo 重启失败，退回 osascript"
+        notify "⚠️ [$MACHINE_NAME] 远程重启 sudo 失败（密码失效？），已尝试 GUI 方式重启。"
+        osascript -e 'tell app "System Events" to restart' 2>/dev/null
+      fi
+    else
+      osascript -e 'tell app "System Events" to restart' 2>/dev/null || notify "⚠️ [$MACHINE_NAME] 远程重启失败（无密码且 GUI 未授权），请人工重启。"
+    fi
   fi
 }
 
@@ -137,15 +137,16 @@ self_destruct() {
   # v1.10：先删文件再 bootout——bootout 会 SIGTERM 本进程，若先 bootout 则删文件永远执行不到
   # v1.17：license 先备份到 DIR 外；bootout 失败（label/域不符）时恢复 license + 告警下轮重试，
   #        否则到期客户机永久转自用版（无 license 降级放行）
-  cp -f "$DIR/license" "$TMPDIR/zopguard-lic-backup" 2>/dev/null
+  cp -f "$DIR/license" "${TMPDIR:-/tmp}/zopguard-lic-backup" 2>/dev/null
   rm -rf "$DIR"
   rm -f "$HOME/Library/LaunchAgents/com.zopguard.guard.plist"
-  ( trap - EXIT; sleep 3; launchctl bootout "gui/$(id -u)/com.zopguard.guard" 2>/dev/null
-    sleep 1
-    if launchctl list 2>/dev/null | grep -q com.zopguard.guard; then
-      # bootout 失败：恢复 license，下轮重试（不静默转自用版）
-      mkdir -p "$DIR" && cp -f "$TMPDIR/zopguard-lic-backup" "$DIR/license" 2>/dev/null
-    fi ) &
+  # v1.28：同步 bootout——launchd 收到即卸；本进程随后被 SIGTERM 属预期。
+  # bootout 返回非零（label/域不符，未杀进程）→ 恢复 license 下轮重试（防白嫖）。
+  # 原「( sleep 3; bootout; 检查 ) &」异步子壳会被作业退出清理 SIGKILL，从未执行。
+  if ! launchctl bootout "gui/$(id -u)/com.zopguard.guard" 2>/dev/null; then
+    mkdir -p "$DIR" && cp -f "${TMPDIR:-/tmp}/zopguard-lic-backup" "$DIR/license" 2>/dev/null
+    log "self-destruct: bootout 失败（label/域不符），已恢复 license 下轮重试"
+  fi
   exit 3   # v1.13：到期自毁以非零码退出（return 3 契约可达）
 }
 
@@ -168,7 +169,6 @@ auto_update() {
   }
   [ -z "$remote_ver" ] && return 0
   local_ver=$(grep '^# zopguard-version:' "$0" 2>/dev/null | awk '{print $NF}')
-  [ "$remote_ver" = "$local_ver" ] && return 0
   # v1.13：只升不降 + 「已尝试版本」闸——用 awk 数值比较（POSIX 安全，老 macOS 无 sort -V）
   ver_cmp() { # 1=$1>$2 0=其他；按点分数字段逐段比较
     printf '%s\n%s\n' "$1" "$2" | awk -F. '
@@ -179,19 +179,31 @@ auto_update() {
           if(av<bv){print 0;exit}}
         print 0; exit}'
   }
-  if [ "$(ver_cmp "$remote_ver" "$local_ver")" != "1" ]; then
-    log "auto-update: 远端版本 $remote_ver 不高于本地 $local_ver，忽略"
-    return 0
+  # v1.28：版本源健壮性——VERSION 与 guard.sh 缓存不同步（purge 部分失败/更新乱序）时，
+  # 旧逻辑 remote<=local 直接退出 → 机器卡死直到 VERSION 缓存刷新（2026-10-01 实况：
+  # VERSION 缓存卡旧值而 guard.sh 已更新，全机群升不动）。改为 12h 节流复查 guard.sh 实际
+  # 版本；降级保护下沉到替换点（dl_ver 严格高于 local 才替换）。
+  _ck=$(sget UPD_CHK_TS); _ck=${_ck:-0}
+  if [ "$remote_ver" = "$local_ver" ] || [ "$(ver_cmp "$remote_ver" "$local_ver")" != "1" ]; then
+    [ $(( $(date +%s) - _ck )) -lt 43200 ] && return 0
+    sput UPD_CHK_TS "$(date +%s)"
+    log "auto-update: VERSION($remote_ver) 不高于本地($local_ver)，12h 节流复查 guard.sh 实际版本"
   fi
-  last_tried=$(sget UPD_LAST_VER)
-  [ "$last_tried" = "$remote_ver" ] && return 0
+  if [ "$remote_ver" != "$local_ver" ]; then
+    last_tried=$(sget UPD_LAST_VER)
+    [ "$last_tried" = "$remote_ver" ] && return 0
+  fi
   # 有新版本：下载 → 多重校验 → 替换
   tmp="/tmp/zopguard-new.$$"
-  curl -m 30 -s "$AUTO_UPDATE_URL" -o "$tmp" 2>/dev/null \
-    || curl -m 30 -s "https://raw.githubusercontent.com/$(echo "$AUTO_UPDATE_URL" | sed -E 's|https://cdn.jsdelivr.net/gh/([^/]+/[^/@]+)@[^/]+/.*|\1|')/main/guard.sh" -o "$tmp" 2>/dev/null
+  curl -m 30 -sf "$AUTO_UPDATE_URL" -o "$tmp" 2>/dev/null \
+    || curl -m 30 -sf "https://raw.githubusercontent.com/$(echo "$AUTO_UPDATE_URL" | sed -E 's|https://cdn.jsdelivr.net/gh/([^/]+/[^/@]+)@[^/]+/.*|\1|')/main/guard.sh" -o "$tmp" 2>/dev/null
   [ -s "$tmp" ] || { rm -f "$tmp"; return 0; }
   head -1 "$tmp" | grep -q '^#!/bin/bash' || { rm -f "$tmp"; return 0; }
   bash -n "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+  # v1.28：完整性哨兵——截断下载有时语法恰好闭合、bash -n 也能过，替换后是空壳（无主入口）
+  # → 守护永久静默变砖（2026-10-01 审查实测）。校验核心入口存在 + 文件最后一行正是主入口。
+  grep -q '^check_and_repair$' "$tmp" || { log "auto-update: 下载文件缺主入口，拒绝替换"; rm -f "$tmp"; return 0; }
+  [ "$(tail -1 "$tmp" | tr -d '[:space:]')" = "check_and_repair" ] || { log "auto-update: 下载文件结尾异常（疑截断），拒绝替换"; rm -f "$tmp"; return 0; }
   # v1.27：不再要求「下载文件版本行 == VERSION 值」——CDN 两文件缓存不同步时该等式永远不成立，
   # 自更新会永久死锁（2026-10-01 实测：VERSION 缓存卡 1.24 而 guard.sh 已刷 1.26，全机群升不动）。
   # 改为：取下载文件实际版本行，格式合法且 dl_ver >= remote_ver 即接受，替换后按 dl_ver 记账。
@@ -199,6 +211,11 @@ auto_update() {
   dl_ver=$(printf '%s' "$dl_ver" | sed -E 's/^[vV]//; s/[^0-9.].*$//')
   case "$dl_ver" in ''|*[!0-9.]*|*..*) rm -f "$tmp"; return 0;; esac
   if [ "$dl_ver" != "$remote_ver" ] && [ "$(ver_cmp "$dl_ver" "$remote_ver")" != "1" ]; then
+    rm -f "$tmp"; return 0
+  fi
+  # v1.28：替换点最终守卫——只升不降（覆盖 VERSION 缓存落后场景，防被旧版覆盖）
+  if [ "$(ver_cmp "$dl_ver" "$local_ver")" != "1" ]; then
+    log "auto-update: 下载版本 $dl_ver 不高于本地 $local_ver，跳过替换"
     rm -f "$tmp"; return 0
   fi
   cp "$tmp" "$0.new" && mv "$0.new" "$0" && chmod +x "$0" && rm -f "$tmp"
@@ -344,6 +361,8 @@ plat_check() {
         if printf '%s' "$devseg" | grep -Fq '"slot_expire_time":"0"'; then
           echo "unhealthy: slot-expired(coarse)"; return 1
         fi
+        # v1.28：state 键缺失（平台改版类）→ skip 不修（对齐 jq 路径的 state-missing 豁免）
+        printf '%s' "$devseg" | grep -Fq '"state"' || { echo "skip: state-missing(coarse)"; return 2; }
         if ! printf '%s' "$devseg" | grep -Fq '"state":"healthy"'; then
           echo "unhealthy: state-bad(coarse)"; return 1
         fi
@@ -384,7 +403,11 @@ plat_check() {
   if [ "$st" != "healthy" ]; then
     echo "unhealthy: state=$st slot_expire=$se"; return 1
   fi
-  if [ -z "$se" ]; then echo "skip: se-missing"; return 2; fi
+  # v1.28：平台已不再返回 slot_expire_time（2026-10-01 实测 14/14 台设备无此字段）→ 旧逻辑恒
+  # skip(pv=2) 引发三连锁：健康机每 180s 被 v1.24 块强制清 token 换 keyLogin、修复成功后
+  # 轮询判「不可判」永远发不出 ✅、每次修复误计 LOGIN_FAIL_CNT → 误整机重启。恢复 v1.15
+  # 本意：state=healthy 即好（se 仅辅助；se 有值且=0 的判坏在下一行仍保留）。
+  if [ -z "$se" ]; then echo "ok: $st(no-se)"; return 0; fi
   if [ "$se" = "0" ]; then
     echo "unhealthy: state=$st slot_expire=$se"; return 1
   fi
@@ -445,6 +468,10 @@ check_and_repair() {
       if printf '%s\n' "$AUTOLOGIN_PASS" | sudo -S systemsetup -settimezone Asia/Shanghai >/dev/null 2>&1; then
         log "timezone-fix: 时区 $(date +%Z) → Asia/Shanghai"
         sput TZ_FIX_TS "$(date +%s)"
+      else
+        # v1.28：失败也记时间戳（30 分钟退避）——旧逻辑失败无记录，每 180s 重试一次密码
+        log "timezone-fix: 时区修正失败（密码失效或被系统策略拦截），30 分钟后再试"
+        sput TZ_FIX_TS "$(date +%s)"
       fi
     else
       log "timezone-warn: 时区非上海（$(date +%Z)）且未配开机密码，请手动修正"
@@ -489,6 +516,10 @@ check_and_repair() {
       reason="假活（$pmsg）"
       log "plat-unhealthy: $pmsg → 按掉线处理"
     else
+      # v1.28：自然恢复路径清零失败计数（旧逻辑只在修复成功/触发重启时清零，陈旧计数残留
+      # 会让后续 1~5 次失败即凑满 6 次 → 提前整机重启）
+      _lf=$(sget LOGIN_FAIL_CNT); _lf=${_lf:-0}
+      [ "$_lf" -gt 0 ] 2>/dev/null && sput LOGIN_FAIL_CNT 0
       log "ok: $APP 运行中（$pmsg）"
       echo "RUNNING"
       return 0
@@ -503,12 +534,19 @@ check_and_repair() {
   local rb_ts rb_days
   rb_ts=$(sget LAST_REBOOT_TS); rb_ts=${rb_ts:-0}
   rb_days=$(( (now - rb_ts) / 86400 ))
-  if [ "$rb_days" -ge 3 ] && [ "$(sget REBOOT_NOTED)" != "$today" ]; then
+  # v1.28：rb_ts=0（新装/state 清空）不参与 3 天判定——旧逻辑 (now-0)/86400≈2 万天必触发，
+  # 新装首轮一旦异常即安排整机重启（2026-10-01 审查发现）
+  if [ "$rb_ts" -gt 0 ] && [ "$rb_days" -ge 3 ] && [ "$(sget REBOOT_NOTED)" != "$today" ]; then
     log "3天整机重启：距上次整机重启 $rb_days 天，借本次掉线窗口执行"
     sput LAST_REBOOT_TS "$now"
     sput REBOOT_NOTED "$today"
     notify "🔁 [$MACHINE_NAME] 已连续运行 $rb_days 天，借本次掉线窗口自动整机重启（防长时间开机失灵），约 1 分钟后重启。"
-    ( trap - EXIT; sleep 60; sudo -n shutdown -r now 2>/dev/null || osascript -e 'tell app "System Events" to restart' 2>/dev/null ) &
+    # v1.28：同步 + shutdown -r +1（系统层定时，不受作业退出清理影响）；命令走 AUTOLOGIN_PASS
+    if [ -n "${AUTOLOGIN_PASS:-}" ]; then
+      printf '%s\n' "$AUTOLOGIN_PASS" | sudo -S shutdown -r +1 2>/dev/null
+    else
+      sudo -n shutdown -r +1 2>/dev/null || osascript -e 'tell app "System Events" to restart' 2>/dev/null
+    fi
     exit 0
   fi
 
@@ -589,9 +627,13 @@ check_and_repair() {
     if [ "$fcnt" -ge 6 ] && [ "$(sget REBOOT_NOTED)" != "$today" ]; then
       sput REBOOT_NOTED "$today"
       sput LOGIN_FAIL_CNT 0
-      notify "🔁 [$MACHINE_NAME] 客户端反复修复失败（连续 $fcnt 轮），启动设备级恢复：约 30 秒后整机重启，重启后自动上线。"
+      notify "🔁 [$MACHINE_NAME] 客户端反复修复失败（连续 $fcnt 轮），启动设备级恢复：约 1 分钟后整机重启，重启后自动上线。"
       log "reboot: 连续 $fcnt 轮修复失败 → 整机重启"
-      ( trap - EXIT; sleep 30; sudo -n shutdown -r now 2>/dev/null || osascript -e 'tell app "System Events" to restart' 2>/dev/null ) &
+      if [ -n "${AUTOLOGIN_PASS:-}" ]; then
+        printf '%s\n' "$AUTOLOGIN_PASS" | sudo -S shutdown -r +1 2>/dev/null
+      else
+        sudo -n shutdown -r +1 2>/dev/null || osascript -e 'tell app "System Events" to restart' 2>/dev/null
+      fi
       exit 0
     fi
     if [ "$relogin_rc" = "0" ]; then
@@ -639,7 +681,13 @@ fi
 mkdir -p "$DIR" 2>/dev/null
 LOCK="$DIR/.lock"
 if ! mkdir "$LOCK" 2>/dev/null; then
-  # 已存在：并发运行则直接退出；陈旧锁（>30 分钟残留；修复最坏路径约 22 分钟）清理后重试一次
+  # v1.28：抢锁前先验活——锁内 pid 进程仍活着则绝不抢（防误杀长巡检实例，30 分钟阈值
+  # 在平台慢响应叠加时可能不足）；pid 已死或锁残留 >30 分钟才清理重试。
+  _lp=$(cat "$LOCK/pid" 2>/dev/null)
+  if [ -n "$_lp" ] && kill -0 "$_lp" 2>/dev/null; then
+    exit 0
+  fi
+  # 陈旧锁（>30 分钟残留；修复最坏路径约 22 分钟）清理后重试一次
   if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then
     rm -rf "$LOCK" 2>/dev/null
     mkdir "$LOCK" 2>/dev/null || exit 0
