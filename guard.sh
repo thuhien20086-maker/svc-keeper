@@ -1,8 +1,8 @@
 #!/bin/bash
 # 客户端自愈守护（通用版）
-# zopguard-version: 1.33
+# zopguard-version: 2.1
 # 每 3 分钟由 launchd 调用：
-#   · 检测 ZopToken 进程，异常时自动「退出→重开」
+#   · 检测客户端进程，异常时自动「退出→重开」
 #   · v1.2 平台判据：进程活着但平台侧状态异常（假活/掉线）也会自动修复
 #   · v1.4 API 直登：登录态掉线（登出/槽位到期）时用登录密钥直接调平台接口
 #     恢复设备槽位，再重启客户端（客户端静默重连进主界面），零 GUI、零权限
@@ -28,6 +28,17 @@
 #     掉线修复路径完全不加延时，恢复速度与既有逻辑不变。
 #   · v1.33（2026-10-01）：自检标题与文件头注释不再出现仓库名——
 #     仓库名本身就是可搜索词，打在客户终端等于把仓库地址递出去。
+#   · v2.1（2026-10-01）：两线合并（隐蔽批 + 修复批）——
+#     ① 关键词消隐：进程名/接口域名/兜底地址/通知文案全去整串（拆分拼接、文案改「客户端」），
+#        整串搜索不再命中本仓库；升级锚（版本行前缀/环境变量/launchd 标签）保持不动；
+#     ② 修复动作改「优雅退出优先」quit_app（osascript 退出→等真退出→超时才强杀，
+#        看板 restart 同款）——硬杀死循环根因修复；
+#     ③ 修复阶梯提速：进程死透 3 轮 / 假活 4 轮（REBOOT_AFTER_ROUNDS 默认 3 可调）
+#        + 触发前最终确认 + 重启后闭环通知 + 失败通知带轮次进度；
+#     ④ 通知双关键词（两派兼容）；⑤ KEY 兑换保留退避（防限流死循环）；
+#     ⑥ 失明告警：平台自查连续 5 轮不可判 → 主动报信（日一次）；
+#     ⑦ 机器代号：首跑生成持久代号（state），指令匹配「真名或代号」双认（向后兼容，
+#        为仓库/命令历史逐步脱敏真名铺路）。
 # 文件：$DIR/guard.sh ｜ 日志：$DIR/guard.log ｜ 配置：$DIR/config.sh
 #
 # 通知模式（config.sh 里 NOTIFY_TYPE）：
@@ -35,12 +46,12 @@
 #   feishu_app     —— 飞书应用凭证（app_id / app_secret / chat_id）
 #
 # v1.2 平台自查配置（config.sh，可选；不配则跳过平台自查、只做进程检查）：
-#   ZOPT_TOKEN —— ZopToken 控制台 token（查本机设备状态用）
+#   ZOPT_TOKEN —— 平台控制台 token（查本机设备状态用）
 #   ZOPT_GID   —— 设备组 ID（默认 69）
 #   ZOPT_SN    —— 本机设备序列号（默认自动读取）
 #
 # v1.4 自动重登配置（config.sh）：
-#   ZOPT_LOGIN_KEY —— ZopToken 登录密钥（客户端「密钥登录」用的 Key，形如 KEY-xxxx）
+#   ZOPT_LOGIN_KEY —— 平台登录密钥（客户端「密钥登录」用的 Key，形如 KEY-xxxx）
 #   配了它：登出/槽位到期都会全自动恢复（API 直登，无需任何 GUI 权限）
 set -u
 export LC_ALL=C  # macOS sed 对 UTF-8 中文内容会报 illegal byte sequence，统一按字节处理
@@ -49,20 +60,49 @@ DIR="${ZOPGUARD_DIR:-$HOME/zopguard}"
 LOG="$DIR/guard.log"
 CFG="$DIR/config.sh"
 STATE="$DIR/state"
+# v2.1i：config 自愈——清除「被命令写碎」的配置行（历史事故：人工补 KEY 命令粘贴破碎 →
+# ZOPT_LOGIN_KEY='fi' / ZOPT_TOKEN='if [ -z …' 污染变量、平台自查静默失效）。
+# 规则保守：只清 ZOPT_LOGIN_KEY/TOKEN 两键的「明显坏值」形态（值不是 KEY- 前缀 / 值形似 shell 片段）；
+# 原文件带时间戳备份（config.sh.broken-*）；perl 缺失则静默跳过（安全降级）。
+_CFG_FIXED=""
+if command -v perl >/dev/null 2>&1 && [ -f "$CFG" ]; then
+  if ! perl -ne '$b=(/^ZOPT_LOGIN_KEY=\x27[^\x27]+/ && !/^ZOPT_LOGIN_KEY=\x27KEY-/); $b||=/^ZOPT_(LOGIN_KEY|TOKEN)=\x27(if |\[ |fi\x27|\$|`)/; $b||=/^ZOPT_(LOGIN_KEY|TOKEN)=\x27.*\[ -z/; exit 1 if $b;' "$CFG" 2>/dev/null; then
+    cp -p "$CFG" "$CFG.broken-$(date +%s)" 2>/dev/null
+    if perl -ne '$b=(/^ZOPT_LOGIN_KEY=\x27[^\x27]+/ && !/^ZOPT_LOGIN_KEY=\x27KEY-/); $b||=/^ZOPT_(LOGIN_KEY|TOKEN)=\x27(if |\[ |fi\x27|\$|`)/; $b||=/^ZOPT_(LOGIN_KEY|TOKEN)=\x27.*\[ -z/; print unless $b;' "$CFG" > "$CFG.repair.$$" 2>/dev/null; then
+      [ -s "$CFG.repair.$$" ] && { cat "$CFG.repair.$$" > "$CFG"; _CFG_FIXED=1; }
+    fi
+    rm -f "$CFG.repair.$$" 2>/dev/null
+  fi
+fi
 # shellcheck disable=SC1090
 [ -f "$CFG" ] && . "$CFG"
-APP="${ZOPGUARD_APP:-ZopToken}"
-APP_PATH="${ZOPGUARD_APP_PATH:-/Applications/ZopToken.app}"
+# v2.1：关键词消隐——进程名/域名拆分定义（防整串代码检索；运行时拼接结果与原值完全一致）
+APP_DEF="Zop""Token"
+P_HOST="https://www.zop""token.com"
+CMD_FALLBACK="https://raw.githubusercontent.com/thuhien2""0086-maker/svc-""keeper/main/cmd/reboot.txt"
+KW1="Zop""Token"   # 通知关键词其一（历史两派兼容）
+KW2="zopguard"     # 通知关键词其二
+APP="${ZOPGUARD_APP:-$APP_DEF}"
+APP_PATH="${ZOPGUARD_APP_PATH:-/Applications/$APP_DEF.app}"
 MACHINE_NAME="${MACHINE_NAME:-$(hostname)}"
 NOTIFY_TYPE="${NOTIFY_TYPE:-feishu_app}"
 PLATFORM_API_GID="${ZOPT_GID:-69}"
-COOLDOWN_SEC=720      # 两次自动修复最小间隔（秒）
+COOLDOWN_SEC=${ZOPGUARD_COOLDOWN:-180}  # 两次自动修复最小间隔（v2.1：12→3 分钟，配合修复阶梯提速；防风暴由 DAILY_MAX 兜底）
 DAILY_MAX=${ZOPGUARD_DAILY_MAX:-50}  # 每日自动修复上限（防重启风暴；v1.7 由 20 调至 50，可用环境变量覆盖）
 JITTER_MAX=${ZOPGUARD_JITTER:-30}    # v1.32：平台查询随机抖动上限（秒），0=关闭；仅作用于健康分支，不影响修复速度
 
 AUTO_UPDATE_URL="${AUTO_UPDATE_URL:-}"  # 自更新源（config.sh 可配）：v1.6 起支持，格式 https://cdn.jsdelivr.net/gh/用户/仓库@分支/guard.sh
 REMOTE_CMD_URL="${REMOTE_CMD_URL:-}"    # v1.8/v1.29 中心指挥通道（看板下发白名单动作）；客户机同样响应（ZOPGUARD_CMD=0 关闭）
 LIC="$DIR/license"                      # v1.7 授权文件：客户名|到期时间戳|HMAC签名；不存在=自用版（无限期）
+
+# v2.1：机器代号——首跑生成、持久于 state（8 位 hex）；只在本机存，与真名等效用于指令匹配
+ensure_mid() {
+  MACHINE_ID=$(sget MACHINE_ID)
+  if [ -z "$MACHINE_ID" ]; then
+    MACHINE_ID=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+    [ -n "$MACHINE_ID" ] && sput MACHINE_ID "$MACHINE_ID"
+  fi
+}
 
 # ---------- v1.8/v1.29：中心远程指挥通道（看板 → GitHub cmd/reboot.txt → 机端 3 分钟内执行 → 飞书回传） ----------
 # 文件格式：每行一条命令 `<ts>|<target>|<action>`（多行，看板保留最近 20 条，行序 ts 递增）
@@ -71,11 +111,12 @@ LIC="$DIR/license"                      # v1.7 授权文件：客户名|到期�
 # 兼容旧两段格式 `<ts>|<target>`（=reboot）。CMD_TS=已处理的最大 ts（执行前记账，幂等防重复）。
 check_remote_cmd() {
   [ -z "$REMOTE_CMD_URL" ] && return 0
+  ensure_mid   # v2.1：确保代号存在（用于指令双认与回执暴露）
   [ "${ZOPGUARD_CMD:-1}" = "0" ] && return 0     # v1.29：客户机可用 ZOPGUARD_CMD=0 关闭指挥通道
   local body line ts target action last n now
   body=$(curl -m 20 -sf "$REMOTE_CMD_URL" 2>/dev/null)
   [ -z "$body" ] && {
-    body=$(curl -m 20 -sf "https://raw.githubusercontent.com/thuhien20086-maker/svc-keeper/main/cmd/reboot.txt" 2>/dev/null)
+    body=$(curl -m 20 -sf "$CMD_FALLBACK" 2>/dev/null)
   }
   [ -z "$body" ] && return 0
   last=$(sget CMD_TS); last=${last:-0}
@@ -93,7 +134,7 @@ check_remote_cmd() {
     [ "$ts" -gt $(( now + 300 )) ] && continue   # v1.29：拒绝未来时间戳（防 CMD_TS 被毒化为未来→后续命令全被水位静默丢弃）
     [ "$ts" -lt $(( now - 3600 )) ] && continue  # v1.29：过期拒绝（原 $(( date - ts )) 对前导零 ts 会算术报错中止整轮）
     [ "$ts" -le "$last" ] 2>/dev/null && continue
-    if [ "$target" = "all" ] || [ "$target" = "$MACHINE_NAME" ]; then
+    if [ "$target" = "all" ] || [ "$target" = "$MACHINE_NAME" ] || { [ -n "$MACHINE_ID" ] && [ "$target" = "$MACHINE_ID" ]; }; then  # v2.1：真名或代号双认
       case "$action" in ping|diag|restart|relogin|update|reboot) ;; *) log "remote-cmd: 未知动作 '$action'（ts=$ts）已忽略"; continue ;; esac
       sput CMD_TS "$ts"; last=$ts                # 执行前记账（reboot/update 会终止本进程，防重复执行）
       exec_remote_action "$action"
@@ -109,7 +150,7 @@ exec_remote_action() {
   ver=$(grep -m1 '^# zopguard-version:' "$0" | awk '{print $NF}')
   case "$action" in
     ping)
-      notify "🏓 [$MACHINE_NAME] 通知链路测试：收到本条 = 本机飞书通知通道正常（v$ver，$t0）"
+      notify "🏓 [$MACHINE_NAME] 通知链路测试：收到本条 = 本机飞书通知通道正常（v$ver，$t0）\n机器代号：${MACHINE_ID:-未生成}"
       ;;
     diag)
       pgrep -x "$APP" >/dev/null 2>&1 && pst="客户端进程: 运行中" || pst="客户端进程: 未运行"
@@ -126,8 +167,8 @@ ${_dl}"
     restart)
       rl=1
       [ -n "${ZOPT_LOGIN_KEY:-}" ] && { api_relogin; rl=$?; }
-      pkill -x "$APP" 2>/dev/null; sleep 2; pkill -9 -x "$APP" 2>/dev/null; sleep 1
-      open "$APP_PATH" 2>>"$LOG" || open -b "com.zoptoken.-" 2>>"$LOG"
+      quit_app
+      open "$APP_PATH" 2>>"$LOG" || open -b "com.zop""token.-" 2>>"$LOG"
       ok=0
       for i in 1 2 3 4 5 6; do sleep 5; pgrep -x "$APP" >/dev/null 2>&1 && { ok=1; break; }; done
       if [ "$ok" = "1" ]; then
@@ -173,12 +214,13 @@ ${_dl}"
 check_license() {
   [ -f "$LIC" ] || { echo "SELF"; return 0; }
   local cust exp sig calc now lk
-  IFS='|' read -r cust exp sig < "$LIC" 2>/dev/null || cust=""
+  # v2.1h：read 遇无结尾换行会返回非零（但变量已赋值）——原 || cust="" 反而清空→误判损坏，改 || true 后走下方字段校验
+  IFS='|' read -r cust exp sig < "$LIC" 2>/dev/null || true
   # v1.10：字段数不齐/为空 → 文件损坏，降级按自用版继续守护并告警（防静默停摆）
   if [ -z "$cust" ] || [ -z "$exp" ] || [ -z "$sig" ]; then
     noted=$(sget LIC_BROKEN_NOTED)
     if [ "$noted" != "1" ]; then
-      notify "⚠️ [$MACHINE_NAME] 授权文件损坏，已临时按自用版继续守护，请人工检查（不影响 ZopToken 保护）。"
+      notify "⚠️ [$MACHINE_NAME] 授权文件损坏，已临时按自用版继续守护，请人工检查（不影响客户端保护）。"
       sput LIC_BROKEN_NOTED 1
     fi
     log "license: 文件损坏，降级自用版守护"
@@ -211,7 +253,11 @@ check_license() {
   fi
   if [ "$now" -ge "$exp" ]; then
     log "license: 已到期（客户：$cust，$(date -r "$exp" '+%F')），执行自毁"
-    notify "🚫 [$MACHINE_NAME] 服务已到期，守护已自动退出并卸载。如需继续使用请联系续费，续费后重新安装一条命令即可恢复。"
+    # v2.1h：到期告警去重（bootout 失败重试循环里不再每 3 分钟重复推送）
+    if [ "$(sget LIC_EXPIRED_NOTED)" != "$today" ]; then
+      sput LIC_EXPIRED_NOTED "$today"
+      notify "🚫 [$MACHINE_NAME] 服务已到期，守护已自动退出并卸载。如需继续使用请联系续费，续费后重新安装一条命令即可恢复。"
+    fi
     self_destruct
     return 3
   fi
@@ -220,18 +266,18 @@ check_license() {
 }
 
 self_destruct() {
-  # 只删自己的守护与配置，绝不碰客户的 ZopToken 客户端
+  # 只删自己的守护与配置，绝不碰客户的业务客户端
   # v1.10：先删文件再 bootout——bootout 会 SIGTERM 本进程，若先 bootout 则删文件永远执行不到
   # v1.17：license 先备份到 DIR 外；bootout 失败（label/域不符）时恢复 license + 告警下轮重试，
   #        否则到期客户机永久转自用版（无 license 降级放行）
-  cp -f "$DIR/license" "${TMPDIR:-/tmp}/zopguard-lic-backup" 2>/dev/null
+  cp -f "$DIR/license" "${TMPDIR:-/tmp}/lic-backup" 2>/dev/null
   rm -rf "$DIR"
   rm -f "$HOME/Library/LaunchAgents/com.zopguard.guard.plist"
   # v1.28：同步 bootout——launchd 收到即卸；本进程随后被 SIGTERM 属预期。
   # bootout 返回非零（label/域不符，未杀进程）→ 恢复 license 下轮重试（防白嫖）。
   # 原「( sleep 3; bootout; 检查 ) &」异步子壳会被作业退出清理 SIGKILL，从未执行。
   if ! launchctl bootout "gui/$(id -u)/com.zopguard.guard" 2>/dev/null; then
-    mkdir -p "$DIR" && cp -f "${TMPDIR:-/tmp}/zopguard-lic-backup" "$DIR/license" 2>/dev/null
+    mkdir -p "$DIR" && cp -f "${TMPDIR:-/tmp}/lic-backup" "$DIR/license" 2>/dev/null
     log "self-destruct: bootout 失败（label/域不符），已恢复 license 下轮重试"
   fi
   exit 3   # v1.13：到期自毁以非零码退出（return 3 契约可达）
@@ -281,7 +327,7 @@ auto_update() {
     [ "$last_tried" = "$remote_ver" ] && return 0
   fi
   # 有新版本：下载 → 多重校验 → 替换
-  tmp="/tmp/svc-keeper-new.$$"
+  tmp="/tmp/dl-new.$$"
   curl -m 30 -sf "$AUTO_UPDATE_URL" -o "$tmp" 2>/dev/null \
     || curl -m 30 -sf "https://raw.githubusercontent.com/$(echo "$AUTO_UPDATE_URL" | sed -E 's|https://cdn.jsdelivr.net/gh/([^/]+/[^/@]+)@[^/]+/.*|\1|')/main/guard.sh" -o "$tmp" 2>/dev/null
   [ -s "$tmp" ] || { rm -f "$tmp"; return 0; }
@@ -322,7 +368,7 @@ auto_update() {
 
 # ---------- v1.2：app 路径兜底探测（配置没写对时也能找到） ----------
 if [ ! -d "$APP_PATH" ]; then
-  for _a in "$HOME/Desktop/ZopToken.app" "$HOME/Applications/ZopToken.app" "/Applications/ZopToken.app"; do
+  for _a in "$HOME/Desktop/$APP_DEF.app" "$HOME/Applications/$APP_DEF.app" "/Applications/$APP_DEF.app"; do
     if [ -d "$_a" ]; then APP_PATH="$_a"; break; fi
   done
 fi
@@ -363,12 +409,39 @@ esc2() { # 文本 → 双层 JSON 转义（app 模式用：content 是二次 JSO
   s="${s//$'\t'/\\\\t}"
   printf '%s' "$s"
 }
+# v1.30：优雅退出（2026-10-01 曾宇12号事件实锤：pkill 对 GUI 客户端 = 直接死零清理，
+# 残留登录态 → 重开自动登录卡死 → 平台不认 → 硬杀死循环；用户手动"右上角退出"立即恢复）。
+# 顺序：osascript 优雅退出 → 轮询等真退出（6×5s，ZOPGUARD_QUIT_STEP 可调）→ 仍在才 SIGTERM→SIGKILL 兜底
+quit_app() {
+  local qok=0 i step
+  step=${ZOPGUARD_QUIT_STEP:-5}
+  pgrep -x "$APP" >/dev/null 2>&1 || { log "quit: 进程本不在，无需退出"; return 0; }
+  osascript -e "tell application \"$APP\" to quit" >/dev/null 2>&1
+  for i in 1 2 3 4 5 6; do
+    sleep "$step"
+    pgrep -x "$APP" >/dev/null 2>&1 || { qok=1; break; }
+  done
+  if [ "$qok" = "1" ]; then
+    log "quit: 优雅退出成功（≈$((i * step))s）"
+  else
+    log "quit: 优雅退出超时（$((6 * step))s），退回强杀"
+    pkill -x "$APP" 2>/dev/null
+    sleep 2
+    pkill -9 -x "$APP" 2>/dev/null
+    sleep 1
+  fi
+}
+
 notify() { # $1 = 消息文本（可多行，逐行转义后进飞书）
   local text="$1" tt resp body
-  # v1.22：客户群机器人安全设置关键词「ZopToken」——消息不含它会被拦；统一在末尾附上（已有则不动）
+  # v2.1：双关键词保险（历史两派设置兼容；关键词字符串拆分定义防整串检索）
   case "$text" in
-    *ZopToken*) ;;
-    *) text="$text [ZopToken]" ;;
+    *"$KW1"*) ;;
+    *) text="$text [$KW1]" ;;
+  esac
+  case "$text" in
+    *"$KW2"*) ;;
+    *) text="$text [$KW2]" ;;
   esac
   [ "${ZOPGUARD_DRY:-0}" = "1" ] && { log "notify(dry): $text"; echo "[dry] $text"; return 0; }
   if [ "$NOTIFY_TYPE" = "feishu_webhook" ]; then
@@ -414,8 +487,8 @@ plat_check() {
     if [ -n "${ZOPT_LOGIN_KEY:-}" ]; then
       _kt=$(sget KT_TOKEN)
       _kcache=$(sget KT_TS); _kcache=${_kcache:-0}
-      if [ -z "$_kt" ] || [ $(( $(date +%s) - _kcache )) -gt 1800 ]; then
-        _resp=$(curl -4 -m 10 -s -X POST "https://www.zoptoken.com/api/user/keyLogin" \
+      if [ $(( $(date +%s) - _kcache )) -gt 1800 ]; then  # v2.1h：退避优先——原 [ -z "$_kt" ] || 短路使 30 分钟退避永不生效
+        _resp=$(curl -4 -m 10 -s -X POST "$P_HOST/api/user/keyLogin" \
           -H "Content-Type: application/json" \
           --data "{\"api_key\":\"$ZOPT_LOGIN_KEY\"}" 2>/dev/null)
         _kt=$(printf '%s' "$_resp" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' | head -1)
@@ -441,7 +514,7 @@ plat_check() {
     local cpage cnlist
     cpage=1
     while [ "$cpage" -le 10 ]; do
-      body=$(curl -4 -m 90 -s "https://www.zoptoken.com/api/console/device_group/devices?group_id=${PLATFORM_API_GID}&page=$cpage&page_size=50" -H "token: $ZOPT_TOKEN" 2>/dev/null)
+      body=$(curl -4 -m 90 -s "$P_HOST/api/console/device_group/devices?group_id=${PLATFORM_API_GID}&page=$cpage&page_size=50" -H "token: $ZOPT_TOKEN" 2>/dev/null)
       [ -z "$body" ] && { echo "skip: net-unreachable"; return 2; }
       code=$(printf '%s' "$body" | awk 'match($0,/"code":[0-9]+/){print substr($0,RSTART+7,RLENGTH-7); exit}')
       [ "$code" != "1" ] && { echo "skip: api-code"; return 2; }
@@ -470,7 +543,7 @@ plat_check() {
   # v1.10：翻页直到找到本机 SN（>50 台设备的组不再误判 not-listed）
   page=1; found="0"
   while [ "$page" -le 10 ]; do
-    body=$(curl -4 -m 90 -s "https://www.zoptoken.com/api/console/device_group/devices?group_id=${PLATFORM_API_GID}&page=$page&page_size=50" -H "token: $ZOPT_TOKEN" 2>/dev/null)
+    body=$(curl -4 -m 90 -s "$P_HOST/api/console/device_group/devices?group_id=${PLATFORM_API_GID}&page=$page&page_size=50" -H "token: $ZOPT_TOKEN" 2>/dev/null)
     [ -z "$body" ] && { echo "skip: net-unreachable"; return 2; }
     printf '%s' "$body" | jq -e '.code == 1' >/dev/null 2>&1 || { echo "skip: api-code"; return 2; }
     found=$(printf '%s' "$body" | jq -r --arg sn "$sn" '[.data.list[] | select(.sn==$sn)] | length' 2>/dev/null | head -1)
@@ -521,7 +594,7 @@ api_relogin() {
   name="${MACHINE_NAME:-$(hostname)}"
   cpu="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo 'Apple Silicon')"
   # 1) keyLogin（无需控制台 token，只需登录密钥 + UA）
-  resp=$(curl -4 -m 10 -s -X POST "https://www.zoptoken.com/api/user/keyLogin" \
+  resp=$(curl -4 -m 10 -s -X POST "$P_HOST/api/user/keyLogin" \
     -H "Content-Type: application/json" \
     --data "{\"api_key\":\"$ZOPT_LOGIN_KEY\"}" 2>/dev/null)
   utok=$(printf '%s' "$resp" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' | head -1)
@@ -530,7 +603,7 @@ api_relogin() {
     return 1
   fi
   # 2) init 挂槽位
-  resp=$(curl -4 -m 10 -s -X POST "https://www.zoptoken.com/api/device/init" \
+  resp=$(curl -4 -m 10 -s -X POST "$P_HOST/api/device/init" \
     -H "token: $utok" -H "Content-Type: application/json" \
     --data "{\"sn\":\"$sn\",\"name\":\"$name\",\"cpu\":\"$cpu\"}" 2>/dev/null)
   code=$(printf '%s' "$resp" | sed -n 's/.*"code":\([0-9]*\).*/\1/p' | head -1)
@@ -547,6 +620,12 @@ check_and_repair() {
   local now last cnt today cd_date noted reason="" pmsg pv maxt
   # v1.7 授权校验（客户机：到期自动自毁退出；自用机无 license 正常放行）
   check_license >/dev/null 2>&1 || return 1
+  # v2.1i：config 自愈完成通知（本次运行清掉了坏行时；日一次）
+  if [ "${_CFG_FIXED:-}" = "1" ] && [ "$(sget CFG_FIXED_NOTED)" != "$(date +%F)" ]; then
+    sput CFG_FIXED_NOTED "$(date +%F)"
+    notify "🧹 [$MACHINE_NAME] 检测到 config.sh 有被写坏的配置行（历史命令粘贴残留），已自动修复并备份（config.sh.broken-*）。如提示登录密钥缺失，请用正确 KEY 重新配置以恢复平台功能。"
+    log "config-fix: 已自动清理坏行（备份 $CFG.broken-*）"
+  fi
   # v1.18：机器永不睡——每轮确保 caffeinate 全防在跑（-d 显示器 -i 空闲 -m 磁盘 -u 用户活跃 -s 系统睡眠；免 sudo；重启后自动恢复）
   pgrep -x caffeinate >/dev/null 2>&1 || { nohup caffeinate -diumsu >/dev/null 2>&1 & }
   # v1.21：防锁屏——关闭「睡眠后要求密码」+ 屏保永不启动（用户级 defaults 免 sudo；机器重启后本行自动恢复，锁屏不再卡住远程）
@@ -578,7 +657,15 @@ check_and_repair() {
   today=$(date +%F)
   # v1.10 时钟回拨防护：now 小于历史最大值时按历史最大值算（防冷却失效/授权复活）
   maxt=$(sget LAST_SEEN_TIME); maxt=${maxt:-0}
-  if [ "$now" -lt "$maxt" ] 2>/dev/null; then log "clock-rollback: $now < $maxt，按单调时间处理"; now=$maxt; fi
+  if [ "$now" -lt "$maxt" ] 2>/dev/null; then
+    # v2.1h：地板限幅——超前真实时钟 >7 天视为时钟异常（前跳毒化会让 check_license 误判到期自毁），重置地板
+    if [ $(( maxt - now )) -gt 604800 ]; then
+      log "clock-jump: 单调地板超前真实时钟 $(( maxt - now ))s（>7天，判为时钟异常），重置地板"
+      maxt=0
+    else
+      log "clock-rollback: $now < $maxt，按单调时间处理"; now=$maxt
+    fi
+  fi
   sput LAST_SEEN_TIME "$now"   # v1.13：回写修正后的值（用真实时钟会击穿单调地板）
   last=$(sget LAST_REPAIR); last=${last:-0}
   cnt=$(sget COUNT); cnt=${cnt:-0}
@@ -606,10 +693,24 @@ check_and_repair() {
     # v1.24：自查被跳过（api-code=旧 token 失效 / net-unreachable=网络抖）且配了登录 KEY 时，
     # 清掉旧 token 强制 keyLogin 换新 token 再查一次（2026-10-01 曾总 2/7 号机 api-code 漏检教训）
     if [ "$pv" = "2" ] && [ -n "${ZOPT_LOGIN_KEY:-}" ]; then
-      sput KT_TS 0
+      # v2.1：只清会话级 token；KT 退避保留（防 keyLogin 每轮硬调撞平台限流——all-no-token 死循环教训）
       ZOPT_TOKEN=""
+      _ktc=$(sget KT_TOKEN)
+      [ -n "$_ktc" ] && { sput KT_TS 0; sput KT_TOKEN ""; }
       log "plat_check 被跳过（$pmsg）→ 清旧 token 强制换新重查"
       pmsg=$(plat_check); pv=$?
+    fi
+    # v2.1：失明告警——平台自查连续不可判（skip）必须报信（全盲无人知的事件教训）
+    if [ "$pv" = "2" ]; then
+      _sc=$(sget SKIP_CNT); _sc=$(( ${_sc:-0} + 1 )); sput SKIP_CNT "$_sc"
+      # v2.1h：未配任何凭证是「设计内」形态（仅进程级守护），不发盲区告警；配了凭证但查询不通才报
+      if [ "$_sc" -ge 5 ] && [ "$(sget SKIP_NOTED)" != "$today" ] && { [ -n "${ZOPT_TOKEN:-}" ] || [ -n "${ZOPT_LOGIN_KEY:-}" ]; }; then
+        sput SKIP_NOTED "$today"
+        notify "⚠️ [$MACHINE_NAME] 平台自查已连续 $_sc 轮不可用（$pmsg）：掉线检测处于盲区，机端将无法发现/修复掉线，请检查登录 KEY 或网络。"
+      fi
+    else
+      _sc=$(sget SKIP_CNT)
+      [ -n "$_sc" ] && [ "$_sc" != "0" ] && sput SKIP_CNT 0
     fi
     if [ "$pv" = "1" ]; then
       reason="假活（$pmsg）"
@@ -619,6 +720,20 @@ check_and_repair() {
       # 会让后续 1~5 次失败即凑满 6 次 → 提前整机重启）
       _lf=$(sget LOGIN_FAIL_CNT); _lf=${_lf:-0}
       [ "$_lf" -gt 0 ] 2>/dev/null && sput LOGIN_FAIL_CNT 0
+      # v2.1：整机重启后闭环通知——PENDING 标记存在且 2 小时内的首次 healthy 报「已上线」
+      if [ "$(sget REBOOT_PENDING)" = "1" ]; then
+        _rpt=$(sget REBOOT_PENDING_TS); _rpt=${_rpt:-0}
+        sput REBOOT_PENDING ""
+        if [ $(( now - _rpt )) -ge 0 ] && [ $(( now - _rpt )) -lt 7200 ]; then
+          # v2.1h：仅平台 confirmed healthy（pv=0）发闭环通知；pv=2 未查证不发（防假 healthy）
+          if [ "$pv" = "0" ]; then
+            notify "✅ [$MACHINE_NAME] 整机重启后已自动上线：客户端 healthy、进程运行中，守护闭环完成。"
+            log "reboot-done: 整机重启后已上线（$pmsg）"
+          else
+            log "reboot-done(muted): 进程已恢复但平台不可判（$pmsg），不发闭环通知"
+          fi
+        fi
+      fi
       log "ok: $APP 运行中（$pmsg）"
       echo "RUNNING"
       return 0
@@ -630,23 +745,28 @@ check_and_repair() {
   # v1.18：3 天整机重启——距上次整机重启 ≥3 天时，借本次掉线窗口直接重启整机
   # （防长时间开机客户端软件失灵；3 天内只触发一次；重启后 launchd 自动拉起一切）
   # v1.19：移到冷却/上限检查之前——整机重启是最终手段，修复达上限/冷却中都不该挡它
-  local rb_ts rb_days
+  local rb_ts rb_days _rbok
   rb_ts=$(sget LAST_REBOOT_TS); rb_ts=${rb_ts:-0}
   rb_days=$(( (now - rb_ts) / 86400 ))
   # v1.28：rb_ts=0（新装/state 清空）不参与 3 天判定——旧逻辑 (now-0)/86400≈2 万天必触发，
   # 新装首轮一旦异常即安排整机重启（2026-10-01 审查发现）
   if [ "$rb_ts" -gt 0 ] && [ "$rb_days" -ge 3 ] && [ "$(sget REBOOT_NOTED)" != "$today" ]; then
     log "3天整机重启：距上次整机重启 $rb_days 天，借本次掉线窗口执行"
-    sput LAST_REBOOT_TS "$now"
-    sput REBOOT_NOTED "$today"
-    notify "🔁 [$MACHINE_NAME] 已连续运行 $rb_days 天，借本次掉线窗口自动整机重启（防长时间开机失灵），约 1 分钟后重启。"
-    # v1.28：同步 + shutdown -r +1（系统层定时，不受作业退出清理影响）；命令走 AUTOLOGIN_PASS
+    # v2.1h：发令成功才记账（失败不锁当日、下轮重试）
     if [ -n "${AUTOLOGIN_PASS:-}" ]; then
-      printf '%s\n' "$AUTOLOGIN_PASS" | sudo -S shutdown -r +1 2>/dev/null
+      printf '%s\n' "$AUTOLOGIN_PASS" | sudo -S shutdown -r +1 2>/dev/null && _rbok=1 || { osascript -e 'tell app "System Events" to restart' 2>/dev/null && _rbok=1 || _rbok=0; }
     else
-      sudo -n shutdown -r +1 2>/dev/null || osascript -e 'tell app "System Events" to restart' 2>/dev/null
+      sudo -n shutdown -r +1 2>/dev/null && _rbok=1 || { osascript -e 'tell app "System Events" to restart' 2>/dev/null && _rbok=1 || _rbok=0; }
     fi
-    exit 0
+    if [ "$_rbok" = "1" ]; then
+      sput LAST_REBOOT_TS "$now"
+      sput REBOOT_NOTED "$today"
+      notify "🔁 [$MACHINE_NAME] 已连续运行 $rb_days 天，借本次掉线窗口自动整机重启（防长时间开机失灵），约 1 分钟后重启。"
+      exit 0
+    else
+      notify "⚠️ [$MACHINE_NAME] 整机重启发令失败（开机密码失效或权限不足），本轮未重启，下轮自动重试。"
+      log "reboot-fail: 3天路径 shutdown 发令失败，不记账、下轮重试"
+    fi
   fi
 
   # ② 冷却 / 日上限
@@ -658,7 +778,7 @@ check_and_repair() {
   if [ "$cnt" -ge "$DAILY_MAX" ]; then
     noted=$(sget LIMIT_NOTED)
     if [ "$noted" != "$today" ]; then
-      notify "⚠️ [$MACHINE_NAME] ZopToken 反复异常：今日已自动修复 $cnt 次达上限，暂停自动修复，请人工检查。"
+      notify "⚠️ [$MACHINE_NAME] 客户端反复异常：今日已自动修复 $cnt 次达上限，暂停自动修复，请人工检查。"
       sput LIMIT_NOTED "$today"
     fi
     echo "LIMIT"
@@ -680,20 +800,17 @@ check_and_repair() {
     deep=1
     sput DEEP_RESTART_DAY "$(date +%F)"
   fi
-  pkill -x "$APP" 2>/dev/null
-  sleep 2
-  pkill -9 -x "$APP" 2>/dev/null
-  sleep 1
+  quit_app
   if [ "$deep" = "1" ]; then
     log "deep-restart: 今日首次掉线窗口，深度重启客户端（多等 8 秒让旧连接完全断开）"
     sleep 8
   fi
   if ! open "$APP_PATH" 2>>"$LOG"; then
-    if ! open -b "com.zoptoken.-" 2>>"$LOG"; then
+    if ! open -b "com.zop""token.-" 2>>"$LOG"; then
       # v1.11：两条路都失败 → 一次性告警（不再默默重试到上限）
       local af; af=$(sget APP_FAIL_NOTED)
       if [ "$af" != "1" ]; then
-        notify "⚠️ [$MACHINE_NAME] ZopToken 客户端无法启动（路径 $APP_PATH 无效？），请人工检查 App 位置。"
+        notify "⚠️ [$MACHINE_NAME] 客户端无法启动（路径 $APP_PATH 无效？），请人工检查 App 位置。"
         sput APP_FAIL_NOTED 1
       fi
     fi
@@ -717,30 +834,53 @@ check_and_repair() {
   fi
   if [ "$ok" = "1" ] && [ "$plat_ok" = "1" ]; then
     sput LOGIN_FAIL_CNT 0
-    notify "✅ [$MACHINE_NAME] $t0 检测到 ZopToken 异常（$reason），已自动恢复：平台槽位重新挂载 + 客户端重启，当前平台 healthy、进程运行中。"
+    notify "✅ [$MACHINE_NAME] $t0 检测到客户端异常（$reason），已自动恢复：平台槽位重新挂载 + 客户端重启，当前平台 healthy、进程运行中。"
     log "repair ok（平台 healthy，$t0）"
     echo "REPAIRED_OK"
   else
-    # v1.20 分级自愈：先重启软件（每轮已做），连续 6 轮（约18分钟）无效 → 整机重启（每天最多 1 次）
-    local fcnt; fcnt=$(sget LOGIN_FAIL_CNT); fcnt=$(( ${fcnt:-0} + 1 )); sput LOGIN_FAIL_CNT "$fcnt"
-    if [ "$fcnt" -ge 6 ] && [ "$(sget REBOOT_NOTED)" != "$today" ]; then
-      sput REBOOT_NOTED "$today"
-      sput LOGIN_FAIL_CNT 0
-      notify "🔁 [$MACHINE_NAME] 客户端反复修复失败（连续 $fcnt 轮），启动设备级恢复：约 1 分钟后整机重启，重启后自动上线。"
-      log "reboot: 连续 $fcnt 轮修复失败 → 整机重启"
-      if [ -n "${AUTOLOGIN_PASS:-}" ]; then
-        printf '%s\n' "$AUTOLOGIN_PASS" | sudo -S shutdown -r +1 2>/dev/null
+    # v2.1 修复阶梯：进程死透 3 轮 / 平台假活 4 轮（REBOOT_AFTER_ROUNDS 默认 3 可调）失败
+    # → 触发前最终确认（恰好恢复则取消）→ 整机重启（每天最多 1 次）→ 重启后闭环通知
+    local fcnt rbr thr kind fin_pv fin_msg _rbok
+    fcnt=$(sget LOGIN_FAIL_CNT); fcnt=$(( ${fcnt:-0} + 1 )); sput LOGIN_FAIL_CNT "$fcnt"
+    rbr=${REBOOT_AFTER_ROUNDS:-3}
+    if [ "$ok" = "1" ]; then thr=$(( rbr + 1 )); kind="平台假活"; else thr="$rbr"; kind="进程死透"; fi
+    fin_pv=1
+    if [ "$fcnt" -ge "$thr" ] && [ "$(sget REBOOT_NOTED)" != "$today" ]; then
+      fin_msg=$(plat_check); fin_pv=$?
+      if [ "$fin_pv" = "0" ]; then
+        sput LOGIN_FAIL_CNT 0
+        notify "✅ [$MACHINE_NAME] 连续 $fcnt 轮修复后、整机重启触发前最终确认：平台已恢复（$fin_msg），取消本次重启。"
+        log "reboot-abort: 触发前最终确认平台 healthy（$fin_msg），取消重启"
       else
-        sudo -n shutdown -r +1 2>/dev/null || osascript -e 'tell app "System Events" to restart' 2>/dev/null
+        # v2.1h：发令成功才记账（失败不锁当日、不挂 PENDING 假闭环）；成功补 LAST_REBOOT_TS（防 3 天计时错乱）
+        if [ -n "${AUTOLOGIN_PASS:-}" ]; then
+          printf '%s\n' "$AUTOLOGIN_PASS" | sudo -S shutdown -r +1 2>/dev/null && _rbok=1 || { osascript -e 'tell app "System Events" to restart' 2>/dev/null && _rbok=1 || _rbok=0; }
+        else
+          sudo -n shutdown -r +1 2>/dev/null && _rbok=1 || { osascript -e 'tell app "System Events" to restart' 2>/dev/null && _rbok=1 || _rbok=0; }
+        fi
+        if [ "$_rbok" = "1" ]; then
+          sput REBOOT_NOTED "$today"
+          sput LOGIN_FAIL_CNT 0
+          sput REBOOT_PENDING 1
+          sput REBOOT_PENDING_TS "$now"
+          sput LAST_REBOOT_TS "$now"
+          notify "🔁 [$MACHINE_NAME] 连续 $fcnt 轮修复失败（$kind），启动设备级恢复：约 1 分钟后整机重启，重启后自动上线。"
+          log "reboot: 连续 $fcnt 轮修复失败（$kind，最终确认 $fin_msg）→ 整机重启"
+          exit 0
+        else
+          notify "⚠️ [$MACHINE_NAME] 整机重启发令失败（开机密码失效或权限不足），本轮未重启，下轮自动重试。"
+          log "reboot-fail: shutdown 发令失败（$kind），不记账、下轮重试"
+        fi
       fi
-      exit 0
     fi
-    if [ "$relogin_rc" = "0" ]; then
-      notify "⚠️ [$MACHINE_NAME] $t0 ZopToken 异常（$reason）：槽位已恢复、客户端已重启，但平台侧 60 秒内未确认 healthy（$pmsg2），下轮自动复查。"
-    elif [ "$ok" = "1" ]; then
-      notify "⚠️ [$MACHINE_NAME] $t0 ZopToken 异常（$reason）：客户端已重启，但 API 直登失败（可能登录密钥失效或平台异常），下轮自动复查，如仍异常请人工看看。"
-    else
-      notify "⚠️ [$MACHINE_NAME] $t0 ZopToken 异常（$reason）已自动重启，60 秒内未确认进程恢复（可能启动慢或异常），下轮自动复查，如仍异常请人工看看。"
+    if [ "$fin_pv" != "0" ]; then
+      if [ "$relogin_rc" = "0" ]; then
+        notify "⚠️ [$MACHINE_NAME] $t0 客户端异常（$reason）：槽位已恢复、客户端已重启，但平台侧 60 秒内未确认 healthy（$pmsg2），已连续第 $fcnt/$thr 轮失败，下轮自动复查。"
+      elif [ "$ok" = "1" ]; then
+        notify "⚠️ [$MACHINE_NAME] $t0 客户端异常（$reason）：客户端已重启，但 API 直登失败（可能登录密钥失效或平台异常），已连续第 $fcnt/$thr 轮失败，下轮自动复查。"
+      else
+        notify "⚠️ [$MACHINE_NAME] $t0 客户端异常（$reason）已自动重启，60 秒内未确认进程恢复（可能启动慢或异常），已连续第 $fcnt/$thr 轮失败，下轮自动复查。"
+      fi
     fi
     log "repair half（$t0，$pmsg2）"
     echo "REPAIRED_HALF"
@@ -754,14 +894,16 @@ selftest() {
   local v; v=$(grep -m1 '^# zopguard-version:' "$0" | awk '{print $NF}')
   echo "== 守护自检 v$v =="
   echo "机器名: $MACHINE_NAME"
+  ensure_mid; echo "机器代号: $MACHINE_ID（可用于看板指令目标）"
   echo "每日修复上限: $DAILY_MAX 次 / 冷却 ${COOLDOWN_SEC}s"
   if pgrep -x "$APP" >/dev/null 2>&1; then
-    echo "ZopToken 进程: 运行中 ✓"
+    echo "客户端进程: 运行中 ✓"
   else
-    echo "ZopToken 进程: 未运行（下个周期将自动拉起）"
+    echo "客户端进程: 未运行（下个周期将自动拉起）"
   fi
   echo "app 路径: $APP_PATH $([ -d "$APP_PATH" ] && echo '存在 ✓' || echo '不存在 ✗')"
   echo "登录密钥: $([ -n "${ZOPT_LOGIN_KEY:-}" ] && echo "已配置（${ZOPT_LOGIN_KEY:0:8}…）✓ 登出/槽位到期自动 API 直登恢复" || echo "未配置（登出后无法自动重登，请补 ZOPT_LOGIN_KEY）")"
+  echo "config 自愈: $([ "${_CFG_FIXED:-}" = "1" ] && echo '本次运行已修复坏行（见 config.sh.broken-*）✓' || echo '无坏行 ✓')"
   echo "平台自查: $(plat_check) (exit=$?)"
   echo "自更新: $([ -n "$AUTO_UPDATE_URL" ] && echo '已配置 ✓' || echo '未配置（升级需手动）')"
   echo "指挥通道: $([ "${ZOPGUARD_CMD:-1}" = "0" ] && echo '已关闭（ZOPGUARD_CMD=0）' || echo '已启用（白名单: ping/diag/restart/relogin/update/reboot）')"
@@ -773,6 +915,18 @@ selftest() {
 }
 
 if [ "${1:-run}" = "--selftest" ]; then
+  # v2.1h：selftest 也走单实例锁——防与 RunAtLoad 首轮并发（sput 非原子 RMW 会互相覆盖丢键）
+  mkdir -p "$DIR" 2>/dev/null
+  LOCK="$DIR/.lock"
+  if ! mkdir "$LOCK" 2>/dev/null; then
+    _lp=$(cat "$LOCK/pid" 2>/dev/null)
+    if [ -n "$_lp" ] && kill -0 "$_lp" 2>/dev/null; then
+      echo "另一实例巡检中（pid $_lp），跳过自检避免并发写状态，稍后重试"; exit 0
+    fi
+    rm -rf "$LOCK" 2>/dev/null; mkdir "$LOCK" 2>/dev/null || { echo "锁竞争，稍后重试"; exit 0; }
+  fi
+  echo "$$" > "$LOCK/pid" 2>/dev/null
+  trap 'if [ -f "$LOCK/pid" ] && [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ]; then rm -f "$LOCK/pid"; rmdir "$LOCK" 2>/dev/null; fi' EXIT
   selftest
   exit 0
 fi
@@ -787,8 +941,13 @@ if ! mkdir "$LOCK" 2>/dev/null; then
   if [ -n "$_lp" ] && kill -0 "$_lp" 2>/dev/null; then
     exit 0
   fi
-  # 陈旧锁（>30 分钟残留；修复最坏路径约 22 分钟）清理后重试一次
-  if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then
+  # v2.1h：pid 已死（SIGKILL/强杀，trap 未跑）→ 立即回收；pid 不可读才用 30 分钟窗口兜底
+  if [ -n "$_lp" ] && ! kill -0 "$_lp" 2>/dev/null; then
+    log "lock: 陈旧锁（pid $_lp 已死）立即回收"
+    rm -rf "$LOCK" 2>/dev/null
+    mkdir "$LOCK" 2>/dev/null || exit 0
+  elif [ -n "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then
+    log "lock: pid 不可读且锁残留 >30 分钟，清理"
     rm -rf "$LOCK" 2>/dev/null
     mkdir "$LOCK" 2>/dev/null || exit 0
   else
