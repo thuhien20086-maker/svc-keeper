@@ -1,6 +1,6 @@
 #!/bin/bash
-# zopguard —— ZopToken 自愈守护（通用版）
-# zopguard-version: 1.30
+# svc-keeper —— 客户端自愈守护（通用版）
+# zopguard-version: 1.31
 # 每 3 分钟由 launchd 调用：
 #   · 检测 ZopToken 进程，异常时自动「退出→重开」
 #   · v1.2 平台判据：进程活着但平台侧状态异常（假活/掉线）也会自动修复
@@ -16,9 +16,14 @@
 #     update 强制更新 / reboot 整机重启），每个动作结果实时飞书回传；
 #     客户机同样响应（config.sh 里 ZOPGUARD_CMD=0 可关闭）
 #   · v1.30（2026-10-01）：请求标识收敛——移除对平台接口调用中的自定义
-#     User-Agent（原 zopguard/1.5、1.5、1.10、1.13、1.23 共五处，且版本号不一致），
+#     User-Agent（原带自建标识与不一致的版本号，共五处），
 #     统一改用系统 curl 默认标识；不改动任何请求参数、调用频率与既有逻辑
-# 文件：~/zopguard/guard.sh ｜ 日志：~/zopguard/guard.log ｜ 配置：~/zopguard/config.sh
+#   · v1.31（2026-10-01）：可见面收敛（纯文本层，不改任何逻辑/时序/请求）——
+#     ① 自检不再回显自更新源地址（原会把仓库地址明文打到客户终端）；
+#     ② 自检标题与部署通知文案去掉内部代号；
+#     ③ 指挥通道兜底地址改指当前仓库名，去掉对旧名跳转的依赖；
+#     ④ 临时文件名去代号。版本行前缀、环境变量名、目录、launchd 标签一律不动。
+# 文件：$DIR/guard.sh ｜ 日志：$DIR/guard.log ｜ 配置：$DIR/config.sh
 #
 # 通知模式（config.sh 里 NOTIFY_TYPE）：
 #   feishu_webhook —— 飞书群机器人 Webhook（推荐，一个 URL 即可）
@@ -64,7 +69,7 @@ check_remote_cmd() {
   local body line ts target action last n now
   body=$(curl -m 20 -sf "$REMOTE_CMD_URL" 2>/dev/null)
   [ -z "$body" ] && {
-    body=$(curl -m 20 -sf "https://raw.githubusercontent.com/thuhien20086-maker/zopguard/main/cmd/reboot.txt" 2>/dev/null)
+    body=$(curl -m 20 -sf "https://raw.githubusercontent.com/thuhien20086-maker/svc-keeper/main/cmd/reboot.txt" 2>/dev/null)
   }
   [ -z "$body" ] && return 0
   last=$(sget CMD_TS); last=${last:-0}
@@ -270,7 +275,7 @@ auto_update() {
     [ "$last_tried" = "$remote_ver" ] && return 0
   fi
   # 有新版本：下载 → 多重校验 → 替换
-  tmp="/tmp/zopguard-new.$$"
+  tmp="/tmp/svc-keeper-new.$$"
   curl -m 30 -sf "$AUTO_UPDATE_URL" -o "$tmp" 2>/dev/null \
     || curl -m 30 -sf "https://raw.githubusercontent.com/$(echo "$AUTO_UPDATE_URL" | sed -E 's|https://cdn.jsdelivr.net/gh/([^/]+/[^/@]+)@[^/]+/.*|\1|')/main/guard.sh" -o "$tmp" 2>/dev/null
   [ -s "$tmp" ] || { rm -f "$tmp"; return 0; }
@@ -735,7 +740,7 @@ check_and_repair() {
 # ---------- 自检（部署时跑一次） ----------
 selftest() {
   local v; v=$(grep -m1 '^# zopguard-version:' "$0" | awk '{print $NF}')
-  echo "== zopguard 自检 v$v =="
+  echo "== svc-keeper 自检 v$v =="
   echo "机器名: $MACHINE_NAME"
   echo "每日修复上限: $DAILY_MAX 次 / 冷却 ${COOLDOWN_SEC}s"
   if pgrep -x "$APP" >/dev/null 2>&1; then
@@ -746,12 +751,12 @@ selftest() {
   echo "app 路径: $APP_PATH $([ -d "$APP_PATH" ] && echo '存在 ✓' || echo '不存在 ✗')"
   echo "登录密钥: $([ -n "${ZOPT_LOGIN_KEY:-}" ] && echo "已配置（${ZOPT_LOGIN_KEY:0:8}…）✓ 登出/槽位到期自动 API 直登恢复" || echo "未配置（登出后无法自动重登，请补 ZOPT_LOGIN_KEY）")"
   echo "平台自查: $(plat_check) (exit=$?)"
-  echo "自更新: $([ -n "$AUTO_UPDATE_URL" ] && echo "已配置 ✓（$AUTO_UPDATE_URL）" || echo "未配置（升级需手动）")"
+  echo "自更新: $([ -n "$AUTO_UPDATE_URL" ] && echo '已配置 ✓' || echo '未配置（升级需手动）')"
   echo "指挥通道: $([ "${ZOPGUARD_CMD:-1}" = "0" ] && echo '已关闭（ZOPGUARD_CMD=0）' || echo '已启用（白名单: ping/diag/restart/relogin/update/reboot）')"
   echo "授权: $([ -f "$LIC" ] && echo "客户机（$(check_license)）" || echo "自用版（无限期）")"
   echo "launchd: $(launchctl list 2>/dev/null | grep -qi zopguard && echo '已加载 ✓' || echo '未加载')"
   echo "日志: $LOG"
-  notify "🟢 [$MACHINE_NAME] zopguard 自愈守护 v$v 已部署：进程掉线/平台假活自动「退出重开」，登录态掉线自动「API 直登恢复」，版本升级自动「自更新」，全过程汇报到本渠道。"
+  notify "🟢 [$MACHINE_NAME] 客户端自愈守护 v$v 已部署：进程掉线/平台假活自动「退出重开」，登录态掉线自动「API 直登恢复」，版本升级自动「自更新」，全过程汇报到本渠道。"
   echo "（自检消息已发送，请确认收到）"
 }
 
