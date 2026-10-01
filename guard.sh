@@ -1,6 +1,6 @@
 #!/bin/bash
 # zopguard —— ZopToken 自愈守护 v1.18（通用版）
-# zopguard-version: 1.22
+# zopguard-version: 1.23
 # 每 3 分钟由 launchd 调用：
 #   · 检测 ZopToken 进程，异常时自动「退出→重开」
 #   · v1.2 平台判据：进程活着但平台侧状态异常（假活/掉线）也会自动修复
@@ -289,6 +289,28 @@ notify() { # $1 = 消息文本（单行）
 # ---------- v1.2：平台自查（假活检测） ----------
 # stdout 一行描述；exit 0=平台正常 1=平台侧异常（按掉线处理） 2=不可判（不动手）
 plat_check() {
+  # v1.23：无控制台 token 但配了登录 KEY → 用 KEY 换 token（缓存 30 分钟）。
+  # 客户机由此获得平台自查能力——掉线/假活可检测、可修复、可报信（2026-09-30 曾总机器假活漏检教训）
+  local _kt _kcache _kg _resp
+  if [ -z "${ZOPT_TOKEN:-}" ]; then
+    if [ -n "${ZOPT_LOGIN_KEY:-}" ]; then
+      _kt=$(sget KT_TOKEN)
+      _kcache=$(sget KT_TS); _kcache=${_kcache:-0}
+      if [ -z "$_kt" ] || [ $(( $(date +%s) - _kcache )) -gt 1800 ]; then
+        _resp=$(curl -m 10 -s -X POST "https://www.zoptoken.com/api/user/keyLogin" \
+          -H "User-Agent: zopguard/1.23" -H "Content-Type: application/json" \
+          --data "{\"api_key\":\"$ZOPT_LOGIN_KEY\"}" 2>/dev/null)
+        _kt=$(printf '%s' "$_resp" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' | head -1)
+        # keyLogin 返回自带 group_id——客户机自动切到客户自己的组（不配 ZOPT_GID 也不会查错组）
+        _kg=$(printf '%s' "$_resp" | sed -n 's/.*"group_id":\([0-9]*\).*/\1/p' | head -1)
+        if [ -n "$_kt" ]; then sput KT_TOKEN "$_kt"; sput KT_TS "$(date +%s)"; fi
+        [ -n "$_kg" ] && sput KT_GID "$_kg"
+      fi
+      [ -n "$_kt" ] && ZOPT_TOKEN="$_kt"
+      _kg=$(sget KT_GID)
+      [ -n "$_kg" ] && PLATFORM_API_GID="$_kg"
+    fi
+  fi
   [ -z "${ZOPT_TOKEN:-}" ] && { echo "skip: no-token"; return 2; }
   local sn body st se found page total nlist code
   sn="${ZOPT_SN:-$(LC_ALL=C ioreg -l 2>/dev/null | sed -n 's/.*IOPlatformSerialNumber.*=.*"\([^"]*\)".*/\1/p' | head -1)}"
@@ -555,7 +577,7 @@ check_and_repair() {
 
 # ---------- 自检（部署时跑一次） ----------
 selftest() {
-  echo "== zopguard 自检 v1.22 =="
+  echo "== zopguard 自检 v1.23 =="
   echo "机器名: $MACHINE_NAME"
   echo "每日修复上限: $DAILY_MAX 次 / 冷却 ${COOLDOWN_SEC}s"
   if pgrep -x "$APP" >/dev/null 2>&1; then
@@ -570,7 +592,7 @@ selftest() {
   echo "授权: $([ -f "$LIC" ] && echo "客户机（$(check_license)）" || echo "自用版（无限期）")"
   echo "launchd: $(launchctl list 2>/dev/null | grep -qi zopguard && echo '已加载 ✓' || echo '未加载')"
   echo "日志: $LOG"
-  notify "🟢 [$MACHINE_NAME] zopguard 自愈守护 v1.22 已部署：进程掉线/平台假活自动「退出重开」，登录态掉线自动「API 直登恢复」，版本升级自动「自更新」，全过程汇报到本渠道。"
+  notify "🟢 [$MACHINE_NAME] zopguard 自愈守护 v1.23 已部署：进程掉线/平台假活自动「退出重开」，登录态掉线自动「API 直登恢复」，版本升级自动「自更新」，全过程汇报到本渠道。"
   echo "（自检消息已发送，请确认收到）"
 }
 
