@@ -12,3 +12,4 @@
 1790850041|梓铜的Mac mini|ping
 1790850046|曾宇12号的Mac mini|ping
 1790850345|梓铜的Mac mini|update
+1790850351|3号 pro|update
