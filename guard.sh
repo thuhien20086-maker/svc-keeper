@@ -1,6 +1,6 @@
 #!/bin/bash
 # zopguard —— ZopToken 自愈守护 v1.18（通用版）
-# zopguard-version: 1.23
+# zopguard-version: 1.24
 # 每 3 分钟由 launchd 调用：
 #   · 检测 ZopToken 进程，异常时自动「退出→重开」
 #   · v1.2 平台判据：进程活着但平台侧状态异常（假活/掉线）也会自动修复
@@ -452,6 +452,14 @@ check_and_repair() {
   # ① 进程检查 + 平台自查
   if pgrep -x "$APP" >/dev/null 2>&1; then
     pmsg=$(plat_check); pv=$?
+    # v1.24：自查被跳过（api-code=旧 token 失效 / net-unreachable=网络抖）且配了登录 KEY 时，
+    # 清掉旧 token 强制 keyLogin 换新 token 再查一次（2026-10-01 曾总 2/7 号机 api-code 漏检教训）
+    if [ "$pv" = "2" ] && [ -n "${ZOPT_LOGIN_KEY:-}" ]; then
+      sput KT_TS 0
+      ZOPT_TOKEN=""
+      log "plat_check 被跳过（$pmsg）→ 清旧 token 强制换新重查"
+      pmsg=$(plat_check); pv=$?
+    fi
     if [ "$pv" = "1" ]; then
       reason="假活（$pmsg）"
       log "plat-unhealthy: $pmsg → 按掉线处理"
@@ -577,7 +585,7 @@ check_and_repair() {
 
 # ---------- 自检（部署时跑一次） ----------
 selftest() {
-  echo "== zopguard 自检 v1.23 =="
+  echo "== zopguard 自检 v1.24 =="
   echo "机器名: $MACHINE_NAME"
   echo "每日修复上限: $DAILY_MAX 次 / 冷却 ${COOLDOWN_SEC}s"
   if pgrep -x "$APP" >/dev/null 2>&1; then
@@ -592,7 +600,7 @@ selftest() {
   echo "授权: $([ -f "$LIC" ] && echo "客户机（$(check_license)）" || echo "自用版（无限期）")"
   echo "launchd: $(launchctl list 2>/dev/null | grep -qi zopguard && echo '已加载 ✓' || echo '未加载')"
   echo "日志: $LOG"
-  notify "🟢 [$MACHINE_NAME] zopguard 自愈守护 v1.23 已部署：进程掉线/平台假活自动「退出重开」，登录态掉线自动「API 直登恢复」，版本升级自动「自更新」，全过程汇报到本渠道。"
+  notify "🟢 [$MACHINE_NAME] zopguard 自愈守护 v1.24 已部署：进程掉线/平台假活自动「退出重开」，登录态掉线自动「API 直登恢复」，版本升级自动「自更新」，全过程汇报到本渠道。"
   echo "（自检消息已发送，请确认收到）"
 }
 
