@@ -18,3 +18,4 @@
 1790850370|曾宇12号的Mac mini|update
 1790850376|曾宇10的Mac mini|update
 1790850381|曾宇9的Mac mini|update
+1790850387|曾宇8的Mac mini|update
