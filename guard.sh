@@ -297,7 +297,7 @@ plat_check() {
       _kt=$(sget KT_TOKEN)
       _kcache=$(sget KT_TS); _kcache=${_kcache:-0}
       if [ -z "$_kt" ] || [ $(( $(date +%s) - _kcache )) -gt 1800 ]; then
-        _resp=$(curl -m 10 -s -X POST "https://www.zoptoken.com/api/user/keyLogin" \
+        _resp=$(curl -4 -m 10 -s -X POST "https://www.zoptoken.com/api/user/keyLogin" \
           -H "User-Agent: zopguard/1.23" -H "Content-Type: application/json" \
           --data "{\"api_key\":\"$ZOPT_LOGIN_KEY\"}" 2>/dev/null)
         _kt=$(printf '%s' "$_resp" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' | head -1)
@@ -323,7 +323,7 @@ plat_check() {
     local cpage cnlist
     cpage=1
     while [ "$cpage" -le 10 ]; do
-      body=$(curl -m 90 -s "https://www.zoptoken.com/api/console/device_group/devices?group_id=${PLATFORM_API_GID}&page=$cpage&page_size=50" -H "token: $ZOPT_TOKEN" -H "User-Agent: zopguard/1.13" 2>/dev/null)
+      body=$(curl -4 -m 90 -s "https://www.zoptoken.com/api/console/device_group/devices?group_id=${PLATFORM_API_GID}&page=$cpage&page_size=50" -H "token: $ZOPT_TOKEN" -H "User-Agent: zopguard/1.13" 2>/dev/null)
       [ -z "$body" ] && { echo "skip: net-unreachable"; return 2; }
       code=$(printf '%s' "$body" | awk 'match($0,/"code":[0-9]+/){print substr($0,RSTART+7,RLENGTH-7); exit}')
       [ "$code" != "1" ] && { echo "skip: api-code"; return 2; }
@@ -350,7 +350,7 @@ plat_check() {
   # v1.10：翻页直到找到本机 SN（>50 台设备的组不再误判 not-listed）
   page=1; found="0"
   while [ "$page" -le 10 ]; do
-    body=$(curl -m 90 -s "https://www.zoptoken.com/api/console/device_group/devices?group_id=${PLATFORM_API_GID}&page=$page&page_size=50" -H "token: $ZOPT_TOKEN" -H "User-Agent: zopguard/1.10" 2>/dev/null)
+    body=$(curl -4 -m 90 -s "https://www.zoptoken.com/api/console/device_group/devices?group_id=${PLATFORM_API_GID}&page=$page&page_size=50" -H "token: $ZOPT_TOKEN" -H "User-Agent: zopguard/1.10" 2>/dev/null)
     [ -z "$body" ] && { echo "skip: net-unreachable"; return 2; }
     printf '%s' "$body" | jq -e '.code == 1' >/dev/null 2>&1 || { echo "skip: api-code"; return 2; }
     found=$(printf '%s' "$body" | jq -r --arg sn "$sn" '[.data.list[] | select(.sn==$sn)] | length' 2>/dev/null | head -1)
@@ -397,7 +397,7 @@ api_relogin() {
   name="${MACHINE_NAME:-$(hostname)}"
   cpu="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo 'Apple Silicon')"
   # 1) keyLogin（无需控制台 token，只需登录密钥 + UA）
-  resp=$(curl -m 10 -s -X POST "https://www.zoptoken.com/api/user/keyLogin" \
+  resp=$(curl -4 -m 10 -s -X POST "https://www.zoptoken.com/api/user/keyLogin" \
     -H "User-Agent: zopguard/1.5" -H "Content-Type: application/json" \
     --data "{\"api_key\":\"$ZOPT_LOGIN_KEY\"}" 2>/dev/null)
   utok=$(printf '%s' "$resp" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' | head -1)
@@ -406,7 +406,7 @@ api_relogin() {
     return 1
   fi
   # 2) init 挂槽位
-  resp=$(curl -m 10 -s -X POST "https://www.zoptoken.com/api/device/init" \
+  resp=$(curl -4 -m 10 -s -X POST "https://www.zoptoken.com/api/device/init" \
     -H "token: $utok" -H "User-Agent: zopguard/1.5" -H "Content-Type: application/json" \
     --data "{\"sn\":\"$sn\",\"name\":\"$name\",\"cpu\":\"$cpu\"}" 2>/dev/null)
   code=$(printf '%s' "$resp" | sed -n 's/.*"code":\([0-9]*\).*/\1/p' | head -1)
