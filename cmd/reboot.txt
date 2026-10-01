@@ -46,3 +46,4 @@
 1790851169|曾宇1的Mac mini|ping
 1790851334|曾宇10的Mac mini|diag
 1790851354|曾宇12号的Mac mini|diag
+1790851682|曾宇1的Mac mini|diag
