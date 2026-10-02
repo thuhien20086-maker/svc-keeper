@@ -1,6 +1,6 @@
 #!/bin/bash
 # 客户端自愈守护（通用版）
-# zopguard-version: 2.1
+# zopguard-version: 2.2
 # 每 3 分钟由 launchd 调用：
 #   · 检测客户端进程，异常时自动「退出→重开」
 #   · v1.2 平台判据：进程活着但平台侧状态异常（假活/掉线）也会自动修复
@@ -39,6 +39,15 @@
 #     ⑥ 失明告警：平台自查连续 5 轮不可判 → 主动报信（日一次）；
 #     ⑦ 机器代号：首跑生成持久代号（state），指令匹配「真名或代号」双认（向后兼容，
 #        为仓库/命令历史逐步脱敏真名铺路）。
+#   · v2.2（2026-10-02）：月订阅续期体系——
+#     ① 到期不再自毁：转「哨兵」模式（卸载主任务、停服待命；不影响客户 ZopToken）；
+#     ② 续期通道：看板「续期」→ 签名指令（Ed25519）→ 机端验签更新授权 → 自动恢复完整守护；
+#     ③ 授权验签升级：新发/续期写 Ed25519 license（机端仅公钥，防伪造型白嫖）；旧 HMAC 兼容；
+#        校验异常 24h 宽限后转哨兵（防升级/换钥/磁盘故障误伤）；
+#     ④ 无 license 且无 ZOPGUARD_SELF=1 标记 → 按未授权处理（防「删文件=免费」）；
+#     ⑤ config.sh 可配 ZOPGUARD_EXPIRE_MODE=destruct 恢复旧「自毁」行为（纠纷/退款专用）；
+#     ⑥ 告警双发：客户机未配 FEISHU_WEBHOOK_URL2 时默认指向服务商监控群——全部掉线/修复/
+#        升级/异常通知同步直达服务商（2026-10-02 需求）。
 # 文件：$DIR/guard.sh ｜ 日志：$DIR/guard.log ｜ 配置：$DIR/config.sh
 #
 # 通知模式（config.sh 里 NOTIFY_TYPE）：
@@ -82,6 +91,10 @@ P_HOST="https://www.zop""token.com"
 CMD_FALLBACK="https://raw.githubusercontent.com/thuhien2""0086-maker/svc-""keeper/main/cmd/reboot.txt"
 KW1="Zop""Token"   # 通知关键词其一（历史两派兼容）
 KW2="zopguard"     # 通知关键词其二
+# v2.2：客户机告警双发——未配 FEISHU_WEBHOOK_URL2 时默认指向服务商监控群（客户机的掉线/修复/升级/
+# 异常通知同步直达服务商；自用机为 app 模式、不受此项影响。地址拆分拼接防整串检索，与既有消隐惯例一致）
+_SVC_HOOK2="https://open.feishu.cn/open-apis/bot/v2/hook/ddfaf8fc-f57a-4b""19-817a-4b66155f6190"
+FEISHU_WEBHOOK_URL2="${FEISHU_WEBHOOK_URL2:-$_SVC_HOOK2}"
 APP="${ZOPGUARD_APP:-$APP_DEF}"
 APP_PATH="${ZOPGUARD_APP_PATH:-/Applications/$APP_DEF.app}"
 MACHINE_NAME="${MACHINE_NAME:-$(hostname)}"
@@ -93,7 +106,9 @@ JITTER_MAX=${ZOPGUARD_JITTER:-30}    # v1.32：平台查询随机抖动上限（
 
 AUTO_UPDATE_URL="${AUTO_UPDATE_URL:-}"  # 自更新源（config.sh 可配）：v1.6 起支持，格式 https://cdn.jsdelivr.net/gh/用户/仓库@分支/guard.sh
 REMOTE_CMD_URL="${REMOTE_CMD_URL:-}"    # v1.8/v1.29 中心指挥通道（看板下发白名单动作）；客户机同样响应（ZOPGUARD_CMD=0 关闭）
-LIC="$DIR/license"                      # v1.7 授权文件：客户名|到期时间戳|HMAC签名；不存在=自用版（无限期）
+LIC="$DIR/license"                      # v1.7 授权文件：客户名|到期时间戳|签名；v2.2 起无文件时仅 ZOPGUARD_SELF=1 视为自用版
+SENTRY_PLIST="$HOME/Library/LaunchAgents/com.zopguard.sentry.plist"  # v2.2 哨兵任务（到期停服后接棒，等待续期自动恢复）
+SENTRY_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA21InRiXmKMQNUGVMmc4f8J6P2y9C5Frt79wxrLgBAF"  # v2.2 续期签发公钥（私钥仅服务商持有，机端只能验不能签）
 
 # v2.1：机器代号——首跑生成、持久于 state（8 位 hex）；只在本机存，与真名等效用于指令匹配
 ensure_mid() {
@@ -102,6 +117,28 @@ ensure_mid() {
     MACHINE_ID=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
     [ -n "$MACHINE_ID" ] && sput MACHINE_ID "$MACHINE_ID"
   fi
+}
+
+# v2.2：哨兵 plist 就位（到期接棒用；缺失才写，不加载）
+ensure_sentry_plist() {
+  [ -f "$SENTRY_PLIST" ] && return 0
+  mkdir -p "$HOME/Library/LaunchAgents" 2>/dev/null || return 0
+  cat > "$SENTRY_PLIST" << PL_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.zopguard.sentry</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/bash</string><string>$DIR/guard.sh</string><string>--sentry-check</string></array>
+  <key>StartInterval</key><integer>180</integer>
+  <key>RunAtLoad</key><true/>
+  <key>AbandonProcessGroup</key><true/>
+  <key>StandardOutPath</key><string>$DIR/sentry.out.log</string>
+  <key>StandardErrorPath</key><string>$DIR/sentry.err.log</string>
+</dict>
+</plist>
+PL_EOF
 }
 
 # ---------- v1.8/v1.29：中心远程指挥通道（看板 → GitHub cmd/reboot.txt → 机端 3 分钟内执行 → 飞书回传） ----------
@@ -129,22 +166,28 @@ check_remote_cmd() {
     target=$(printf '%s' "$line" | cut -d'|' -f2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')  # 只去首尾，保留名字内部空格
     action=$(printf '%s' "$line" | cut -d'|' -f3 | tr -d '[:space:]')
     [ -z "$action" ] && action="reboot"          # 旧两段格式兼容
+    rpl=$(printf '%s' "$line" | cut -d'|' -f4 | tr -d '[:space:]')   # v2.2：renew 载荷 b64（其他动作为空）
+    rsg=$(printf '%s' "$line" | cut -d'|' -f5 | tr -d '[:space:]')   # v2.2：renew 签名 b64
     case "$ts" in *[!0-9]*|"") continue ;; esac
     [ ${#ts} -gt 12 ] && continue                # v1.29：位数上限——超 int64 的 ts 让比较报错失效→每轮重复执行
     [ "$ts" -gt $(( now + 300 )) ] && continue   # v1.29：拒绝未来时间戳（防 CMD_TS 被毒化为未来→后续命令全被水位静默丢弃）
-    [ "$ts" -lt $(( now - 3600 )) ] && continue  # v1.29：过期拒绝（原 $(( date - ts )) 对前导零 ts 会算术报错中止整轮）
+    if [ "$action" = "renew" ]; then
+      [ "$ts" -lt $(( now - 604800 )) ] && continue   # v2.2：续期放宽 7 天（交费后机器任意时间上线都生效）
+    else
+      [ "$ts" -lt $(( now - 3600 )) ] && continue  # v1.29：过期拒绝（原 $(( date - ts )) 对前导零 ts 会算术报错中止整轮）
+    fi
     [ "$ts" -le "$last" ] 2>/dev/null && continue
     if [ "$target" = "all" ] || [ "$target" = "$MACHINE_NAME" ] || { [ -n "$MACHINE_ID" ] && [ "$target" = "$MACHINE_ID" ]; }; then  # v2.1：真名或代号双认
-      case "$action" in ping|diag|restart|relogin|update|reboot) ;; *) log "remote-cmd: 未知动作 '$action'（ts=$ts）已忽略"; continue ;; esac
+      case "$action" in ping|diag|restart|relogin|update|reboot|renew) ;; *) log "remote-cmd: 未知动作 '$action'（ts=$ts）已忽略"; continue ;; esac
       sput CMD_TS "$ts"; last=$ts                # 执行前记账（reboot/update 会终止本进程，防重复执行）
-      exec_remote_action "$action"
+      exec_remote_action "$action" "$rpl" "$rsg"
     fi
   done <<< "$body"
 }
 
 # ---------- v1.29：白名单动作执行器（看板远程指令；每个动作实时飞书回传） ----------
 exec_remote_action() {
-  local action="$1" t0 pst ver diag_plat _dl _cnt _lf i ok rl
+  local action="$1" rpl="$2" rsg="$3" t0 pst ver diag_plat _dl _cnt _lf i ok rl
   t0=$(date '+%F %T')
   log "remote-cmd: 执行远程动作 $action"
   ver=$(grep -m1 '^# zopguard-version:' "$0" | awk '{print $NF}')
@@ -206,40 +249,51 @@ ${_dl}"
         osascript -e 'tell app "System Events" to restart' 2>/dev/null || notify "⚠️ [$MACHINE_NAME] 远程重启失败（无密码且 GUI 未授权），请人工重启。"
       fi
       ;;
+    renew)
+      apply_renew "$rpl" "$rsg"; rl=$?
+      if [ "$rl" = "1" ] && [ "$(sget RENEW_BAD_NOTED)" != "$(date +%F)" ]; then
+        sput RENEW_BAD_NOTED "$(date +%F)"
+        notify "⚠️ [$MACHINE_NAME] 收到一条续期指令但签名验证未通过，已忽略（$t0）。若非本人操作请检查仓库写入权限。"
+      fi
+      ;;
   esac
 }
 
 # ---------- v1.7：授权校验（license）+ 到期自毁 ----------
 # license 行格式：客户名|到期时间戳|HMAC(客户名|到期时间戳，密钥)  密钥在 config.sh 的 ZOPGUARD_LICENSE_KEY
 check_license() {
-  [ -f "$LIC" ] || { echo "SELF"; return 0; }
+  if [ ! -f "$LIC" ]; then
+    # v2.2：无授权文件——自用机标记（ZOPGUARD_SELF=1）放行；否则按未授权处理（防「删文件=免费」）
+    [ "${ZOPGUARD_SELF:-}" = "1" ] && { echo "SELF"; return 0; }
+    _lic_grace_check "missing"
+    return $?
+  fi
   local cust exp sig calc now lk
   # v2.1h：read 遇无结尾换行会返回非零（但变量已赋值）——原 || cust="" 反而清空→误判损坏，改 || true 后走下方字段校验
   IFS='|' read -r cust exp sig < "$LIC" 2>/dev/null || true
   # v1.10：字段数不齐/为空 → 文件损坏，降级按自用版继续守护并告警（防静默停摆）
   if [ -z "$cust" ] || [ -z "$exp" ] || [ -z "$sig" ]; then
-    noted=$(sget LIC_BROKEN_NOTED)
-    if [ "$noted" != "1" ]; then
-      notify "⚠️ [$MACHINE_NAME] 授权文件损坏，已临时按自用版继续守护，请人工检查（不影响客户端保护）。"
-      sput LIC_BROKEN_NOTED 1
-    fi
-    log "license: 文件损坏，降级自用版守护"
-    echo "BROKEN"
-    return 0
+    # v2.2：文件损坏——自用标记放行；否则宽限（防误伤）→超时转哨兵
+    [ "${ZOPGUARD_SELF:-}" = "1" ] && { echo "SELF"; return 0; }
+    _lic_grace_check "broken"
+    return $?
   fi
-  lk="${ZOPGUARD_LICENSE_KEY:-}"
-  [ -z "$lk" ] && { log "license: 缺 ZOPGUARD_LICENSE_KEY，降级自用版守护"; echo "BROKEN-NOKEY"; return 0; }
-  calc=$(printf '%s|%s' "$cust" "$exp" | openssl dgst -sha256 -hmac "$lk" 2>/dev/null | awk '{print $NF}')
-  if [ "$calc" != "$sig" ]; then
-    noted=$(sget LIC_BROKEN_NOTED)
-    if [ "$noted" != "1" ]; then
-      notify "⚠️ [$MACHINE_NAME] 授权签名无效（可能被篡改或密钥不匹配），已临时按自用版继续守护，请人工检查。"
-      sput LIC_BROKEN_NOTED 1
+  # v2.2：签名校验——新式 Ed25519（第 3 段为长 b64）；旧式 HMAC（64 位 hex）兼容
+  local _ok=0 _lk
+  if [ ${#sig} -gt 100 ]; then
+    verify_ed25519_license "$cust" "$exp" "$sig" && _ok=1
+  else
+    _lk="${ZOPGUARD_LICENSE_KEY:-}"
+    if [ -n "$_lk" ]; then
+      calc=$(printf '%s|%s' "$cust" "$exp" | openssl dgst -sha256 -hmac "$_lk" 2>/dev/null | awk '{print $NF}')
+      [ "$calc" = "$sig" ] && _ok=1
     fi
-    log "license: 签名无效，降级自用版守护"
-    echo "BROKEN-SIG"
-    return 0
   fi
+  if [ "$_ok" != "1" ]; then
+    _lic_grace_check "sigfail"
+    return $?
+  fi
+  sput LIC_FAIL_TS 0
   now=$(date +%s)
   # v1.11：时钟回拨防护（license 到期判定用单调时间，防回拨复活）
   local lm; lm=$(sget LAST_SEEN_TIME); lm=${lm:-0}
@@ -252,13 +306,14 @@ check_license() {
     fi
   fi
   if [ "$now" -ge "$exp" ]; then
-    log "license: 已到期（客户：$cust，$(date -r "$exp" '+%F')），执行自毁"
-    # v2.1h：到期告警去重（bootout 失败重试循环里不再每 3 分钟重复推送）
-    if [ "$(sget LIC_EXPIRED_NOTED)" != "$today" ]; then
-      sput LIC_EXPIRED_NOTED "$today"
-      notify "🚫 [$MACHINE_NAME] 服务已到期，守护已自动退出并卸载。如需继续使用请联系续费，续费后重新安装一条命令即可恢复。"
+    log "license: 已到期（客户：$cust，$(date -r "$exp" '+%F')），转入哨兵模式"
+    # v2.2：到期不再自毁——停服转哨兵，续期后自动恢复（不影响客户 ZopToken）
+    # 去重告警（v2.2 修 v2.1h 的 $today 作用域 bug：check_license 内拿不到调用者的 today）
+    if [ "$(sget LIC_EXPIRED_NOTED)" != "$(date +%F)" ]; then
+      sput LIC_EXPIRED_NOTED "$(date +%F)"
+      notify "🚫 [$MACHINE_NAME] 服务已到期，自愈守护已停止（您的 ZopToken 不受影响）。续费后自动恢复，如需继续请联系服务商。"
     fi
-    self_destruct
+    expire_to_sentry
     return 3
   fi
   echo "LIC($cust/$(date -r "$exp" '+%F'))"
@@ -281,6 +336,167 @@ self_destruct() {
     log "self-destruct: bootout 失败（label/域不符），已恢复 license 下轮重试"
   fi
   exit 3   # v1.13：到期自毁以非零码退出（return 3 契约可达）
+}
+
+# ---------- v2.2：授权验签（Ed25519）与续期/哨兵机制 ----------
+# 续期签发私钥仅服务商持有；机端只有公钥（能验不能签）。
+verify_ed25519_license() {   # $1=客户名 $2=到期ts $3=b64(签名)
+  local wd="${TMPDIR:-/tmp}/zg-lv.$$" rc
+  mkdir -p "$wd" 2>/dev/null || return 1
+  printf '%s|%s' "$1" "$2" > "$wd/payload"
+  printf '%s' "$3" | openssl base64 -d -A > "$wd/pay.sig" 2>/dev/null || { rm -rf "$wd"; return 1; }
+  printf 'renew@zopguard %s\n' "$SENTRY_PUBKEY" > "$wd/allowed"
+  ssh-keygen -Y verify -f "$wd/allowed" -I renew@zopguard -n zopguard-renew -s "$wd/pay.sig" < "$wd/payload" >/dev/null 2>&1
+  rc=$?
+  rm -rf "$wd"
+  return $rc
+}
+
+# v2.2：轻量授权状态（无副作用；哨兵用）——license 有效且未过期
+license_ok_quick() {
+  [ -f "$LIC" ] || return 1
+  local cust exp sig
+  IFS='|' read -r cust exp sig < "$LIC" 2>/dev/null || true
+  [ -z "$cust" ] || [ -z "$exp" ] || [ -z "$sig" ] && return 1
+  case "$exp" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$(date +%s)" -ge "$exp" ] && return 1
+  if [ ${#sig} -gt 100 ]; then
+    verify_ed25519_license "$cust" "$exp" "$sig"
+    return $?
+  fi
+  local lk="${ZOPGUARD_LICENSE_KEY:-}"
+  [ -z "$lk" ] && return 1
+  [ "$(printf '%s|%s' "$cust" "$exp" | openssl dgst -sha256 -hmac "$lk" 2>/dev/null | awk '{print $NF}')" = "$sig" ]
+}
+
+# v2.2：授权异常宽限——24h 内继续守护（防误伤），超时转哨兵（防伪造型白嫖）
+_lic_grace_check() {
+  local why="$1" ft now
+  now=$(date +%s)
+  ft=$(sget LIC_FAIL_TS); ft=${ft:-0}
+  if [ "$ft" = "0" ]; then
+    sput LIC_FAIL_TS "$now"
+    if [ "$(sget LIC_FAIL_NOTED)" != "$(date +%F)" ]; then
+      sput LIC_FAIL_NOTED "$(date +%F)"
+      notify "⚠️ [$MACHINE_NAME] 授权校验异常（$why）：7 天内自动重试；若持续异常，自愈服务将暂停（您的 ZopToken 不受影响）。"
+    fi
+    log "license: 校验异常（$why），宽限 7 天"
+    echo "LIC-WARN"
+    return 0
+  fi
+  if [ $(( now - ft )) -lt 604800 ]; then
+    # v2.2：宽限 1 天→7 天（自用机标记/误伤缓冲）；持续期间每日提醒一次
+    if [ "$(sget LIC_FAIL_NOTED)" != "$(date +%F)" ]; then
+      sput LIC_FAIL_NOTED "$(date +%F)"
+      notify "⚠️ [$MACHINE_NAME] 授权校验异常持续中（第 $(( (now - ft) / 86400 + 1 )) 天，7 天后将暂停服务——您的 ZopToken 不受影响）。"
+    fi
+    echo "LIC-WARN"
+    return 0
+  fi
+  log "license: 校验持续异常超 7 天（$why），转入哨兵模式"
+  if [ "$(sget LIC_EXPIRED_NOTED)" != "$(date +%F)" ]; then
+    sput LIC_EXPIRED_NOTED "$(date +%F)"
+    notify "🚫 [$MACHINE_NAME] 授权校验持续异常，自愈守护已暂停（您的 ZopToken 不受影响）。如需恢复请联系服务商。"
+  fi
+  expire_to_sentry
+  return 3
+}
+
+# v2.2：续期指令处理（主任务与哨兵共用）
+# 指令：<ts>|all|renew|<b64(客户名|新到期)>|<b64(签名)>；签名对象=客户名|新到期
+# 返回：0=成功（含自动恢复）｜1=签名无效（可疑，告警）｜2=与本机无关（静默）
+apply_renew() {
+  local pl_b64="$1" sg_b64="$2"
+  local wd cust exp cur_cust cur_exp
+  wd="${TMPDIR:-/tmp}/zg-rn.$$"
+  rm -rf "$wd"; mkdir -p "$wd" 2>/dev/null || return 2
+  printf '%s' "$pl_b64" | openssl base64 -d -A > "$wd/payload" 2>/dev/null || { rm -rf "$wd"; return 2; }
+  printf '%s' "$sg_b64" | openssl base64 -d -A > "$wd/pay.sig" 2>/dev/null || { rm -rf "$wd"; return 2; }
+  printf 'renew@zopguard %s\n' "$SENTRY_PUBKEY" > "$wd/allowed"
+  if ! ssh-keygen -Y verify -f "$wd/allowed" -I renew@zopguard -n zopguard-renew -s "$wd/pay.sig" < "$wd/payload" >/dev/null 2>&1; then
+    log "renew: 签名验证失败，忽略"
+    rm -rf "$wd"; return 1
+  fi
+  IFS='|' read -r cust exp < "$wd/payload"
+  rm -rf "$wd"
+  case "$exp" in ''|*[!0-9]*) log "renew: 载荷无效"; return 2 ;; esac
+  cur_cust=$(cut -d'|' -f1 "$LIC" 2>/dev/null)
+  cur_exp=$(cut -d'|' -f2 "$LIC" 2>/dev/null)
+  if [ -n "$cur_cust" ] && [ "$cust" != "$cur_cust" ]; then
+    log "renew: 客户名不匹配（非本机指令），忽略"
+    return 2
+  fi
+  case "$cur_exp" in ''|*[!0-9]*) cur_exp=0 ;; esac
+  if [ "$exp" -le "$cur_exp" ] 2>/dev/null; then
+    log "renew: 新到期（$exp）未超过当前（$cur_exp），忽略"
+    return 2
+  fi
+  printf '%s|%s|%s\n' "$cust" "$exp" "$sg_b64" > "$LIC" && chmod 600 "$LIC"
+  log "renew: 授权已更新（$cust 至 $(date -r "$exp" '+%F')）"
+  sput LIC_FAIL_TS 0; sput LIC_EXPIRED_NOTED ""; sput LIC_NOTED ""
+  if [ "$(sget SENTRY_MODE)" = "1" ]; then
+    sput SENTRY_MODE ""
+    notify "✅ [$MACHINE_NAME] 续期成功（至 $(date -r "$exp" '+%F')）：自愈守护已自动恢复，继续为您值守。"
+    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.zopguard.guard.plist" 2>/dev/null || launchctl load "$HOME/Library/LaunchAgents/com.zopguard.guard.plist" 2>/dev/null || true
+    launchctl bootout "gui/$(id -u)/com.zopguard.sentry" 2>/dev/null || true
+  else
+    notify "✅ [$MACHINE_NAME] 续期成功（至 $(date -r "$exp" '+%F')），服务继续运行。"
+  fi
+  return 0
+}
+
+# v2.2：到期/未授权 → 停服转哨兵（不再自毁；ZOPGUARD_EXPIRE_MODE=destruct 恢复旧自毁）
+expire_to_sentry() {
+  if [ "${ZOPGUARD_EXPIRE_MODE:-sentry}" = "destruct" ]; then
+    self_destruct
+    return
+  fi
+  sput SENTRY_MODE 1
+  ensure_sentry_plist
+  launchctl bootout "gui/$(id -u)/com.zopguard.sentry" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$SENTRY_PLIST" 2>/dev/null || launchctl load "$SENTRY_PLIST" 2>/dev/null || true
+  log "expire: 已转哨兵模式（等待续期自动恢复）"
+  launchctl bootout "gui/$(id -u)/com.zopguard.guard" 2>/dev/null || log "expire: 主任务 bootout 失败，下轮重试"
+  exit 3
+}
+
+# v2.2：哨兵模式（launchd: com.zopguard.sentry 每 180s）——不保活/不修复/不碰客户端，只等续期
+sentry_run() {
+  local body line ts target action rpl rsg last now n
+  if license_ok_quick; then
+    log "sentry: 检测到授权已恢复 → 装回主任务"
+    sput SENTRY_MODE ""
+    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.zopguard.guard.plist" 2>/dev/null || launchctl load "$HOME/Library/LaunchAgents/com.zopguard.guard.plist" 2>/dev/null || true
+    launchctl bootout "gui/$(id -u)/com.zopguard.sentry" 2>/dev/null || true
+    exit 0
+  fi
+  [ -z "$REMOTE_CMD_URL" ] && return 0
+  ensure_mid
+  body=$(curl -m 20 -sf "$REMOTE_CMD_URL" 2>/dev/null)
+  [ -z "$body" ] && body=$(curl -m 20 -sf "$CMD_FALLBACK" 2>/dev/null)
+  [ -z "$body" ] && return 0
+  last=$(sget CMD_TS); last=${last:-0}
+  now=$(date +%s)
+  n=0
+  while IFS= read -r line; do
+    n=$((n+1)); [ "$n" -gt 80 ] && break
+    [ -z "$line" ] && continue
+    action=$(printf '%s' "$line" | cut -d'|' -f3 | tr -d '[:space:]')
+    [ "$action" = "renew" ] || continue
+    ts=$(printf '%s' "$line" | cut -d'|' -f1 | tr -d '[:space:]')
+    case "$ts" in *[!0-9]*|"") continue ;; esac
+    [ ${#ts} -gt 12 ] && continue
+    [ "$ts" -gt $(( now + 300 )) ] && continue
+    [ "$ts" -le "$last" ] 2>/dev/null && continue
+    target=$(printf '%s' "$line" | cut -d'|' -f2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [ "$target" = "all" ] || [ "$target" = "$MACHINE_NAME" ] || { [ -n "$MACHINE_ID" ] && [ "$target" = "$MACHINE_ID" ]; }; then
+      rpl=$(printf '%s' "$line" | cut -d'|' -f4 | tr -d '[:space:]')
+      rsg=$(printf '%s' "$line" | cut -d'|' -f5 | tr -d '[:space:]')
+      sput CMD_TS "$ts"; last=$ts
+      apply_renew "$rpl" "$rsg"
+    fi
+  done <<< "$body"
+  return 0
 }
 
 # ---------- v1.6：自更新（每轮顺带查一次 VERSION，有新版本自动下载→校验→替换→重启） ----------
@@ -618,7 +834,9 @@ api_relogin() {
 # ---------- 核心：检查 & 修复 ----------
 check_and_repair() {
   local now last cnt today cd_date noted reason="" pmsg pv maxt
-  # v1.7 授权校验（客户机：到期自动自毁退出；自用机无 license 正常放行）
+  # v2.2：哨兵 plist 就位（到期切换接棒用；缺失才写）
+  ensure_sentry_plist
+  # v1.7/v2.2 授权校验（到期/未授权→转哨兵待命，续期自动恢复；自用机 ZOPGUARD_SELF=1 放行）
   check_license >/dev/null 2>&1 || return 1
   # v2.1i：config 自愈完成通知（本次运行清掉了坏行时；日一次）
   if [ "${_CFG_FIXED:-}" = "1" ] && [ "$(sget CFG_FIXED_NOTED)" != "$(date +%F)" ]; then
@@ -906,8 +1124,15 @@ selftest() {
   echo "config 自愈: $([ "${_CFG_FIXED:-}" = "1" ] && echo '本次运行已修复坏行（见 config.sh.broken-*）✓' || echo '无坏行 ✓')"
   echo "平台自查: $(plat_check) (exit=$?)"
   echo "自更新: $([ -n "$AUTO_UPDATE_URL" ] && echo '已配置 ✓' || echo '未配置（升级需手动）')"
-  echo "指挥通道: $([ "${ZOPGUARD_CMD:-1}" = "0" ] && echo '已关闭（ZOPGUARD_CMD=0）' || echo '已启用（白名单: ping/diag/restart/relogin/update/reboot）')"
-  echo "授权: $([ -f "$LIC" ] && echo "客户机（$(check_license)）" || echo "自用版（无限期）")"
+  echo "指挥通道: $([ "${ZOPGUARD_CMD:-1}" = "0" ] && echo '已关闭（ZOPGUARD_CMD=0）' || echo '已启用（白名单: ping/diag/restart/relogin/update/reboot/renew）')"
+  if [ -f "$LIC" ]; then
+    echo "授权: 客户机（$(check_license)）"
+  elif [ "${ZOPGUARD_SELF:-}" = "1" ]; then
+    echo "授权: 自用版（无限期）"
+  else
+    echo "授权: 未标记（无 license 且无 ZOPGUARD_SELF=1）"
+  fi
+  echo "哨兵(续期恢复): $([ -f "$SENTRY_PLIST" ] && echo '已就位 ✓' || echo '未部署（将在首轮巡检就位）')"
   echo "launchd: $(launchctl list 2>/dev/null | grep -qi zopguard && echo '已加载 ✓' || echo '未加载')"
   echo "日志: $LOG"
   notify "🟢 [$MACHINE_NAME] 客户端自愈守护 v$v 已部署：进程掉线/平台假活自动「退出重开」，登录态掉线自动「API 直登恢复」，版本升级自动「自更新」，全过程汇报到本渠道。"
@@ -957,5 +1182,11 @@ fi
 # v1.17：锁内写 pid 文件——EXIT trap 只删自己创建的锁（防睡眠>30min 后旧实例醒来误删新实例锁 → 双实例风暴）
 echo "$$" > "$LOCK/pid" 2>/dev/null
 trap 'if [ -f "$LOCK/pid" ] && [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ]; then rm -f "$LOCK/pid"; rmdir "$LOCK" 2>/dev/null; fi' EXIT
+
+# ---------- v2.2：哨兵入口（到期停服态；launchd: com.zopguard.sentry） ----------
+if [ "${1:-run}" = "--sentry-check" ]; then
+  sentry_run
+  exit $?
+fi
 
 check_and_repair
