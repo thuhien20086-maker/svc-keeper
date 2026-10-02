@@ -1,4 +1,3 @@
-1790850345|梓铜的Mac mini|update
 1790850351|3号 pro|update
 1790850357|龙哥的Mac mini|update
 1790850364|龙哥2的Mac mini|update
@@ -48,3 +47,4 @@
 1790901459|曾宇12号的Mac mini|restart
 1790901467|曾宇9的Mac mini|restart
 1790902433|曾宇12号的Mac mini|ping
+1790902572|曾宇12号的Mac mini|ping
