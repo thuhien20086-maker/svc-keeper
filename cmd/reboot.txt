@@ -1,4 +1,3 @@
-1790850957|龙哥的Mac mini|update
 1790850962|龙哥2的Mac mini|update
 1790850967|曾宇12号的Mac mini|update
 1790850973|曾宇10的Mac mini|update
@@ -48,3 +47,4 @@
 1790948240|all|diag
 1790949692|曾宇1的Mac mini|ping
 1790990635|all|diag
+1790994265|龙哥2的Mac mini|ping
