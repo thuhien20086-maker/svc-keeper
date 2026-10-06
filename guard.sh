@@ -1,6 +1,6 @@
 #!/bin/bash
 # 客户端自愈守护（通用版）
-# zopguard-version: 2.2
+# zopguard-version: 2.3
 # 每 3 分钟由 launchd 调用：
 #   · 检测客户端进程，异常时自动「退出→重开」
 #   · v1.2 平台判据：进程活着但平台侧状态异常（假活/掉线）也会自动修复
@@ -48,6 +48,10 @@
 #     ⑤ config.sh 可配 ZOPGUARD_EXPIRE_MODE=destruct 恢复旧「自毁」行为（纠纷/退款专用）；
 #     ⑥ 告警双发：客户机未配 FEISHU_WEBHOOK_URL2 时默认指向服务商监控群——全部掉线/修复/
 #        升级/异常通知同步直达服务商（2026-10-02 需求）。
+#   · v2.3（2026-10-06）：命令通道硬化——
+#     ① 命令多源合流 fetch_cmd_best()：配置源+新名 jsd/raw 兜底全试，取最新 ts；单源缓存
+#        冻结/改名失效不再致命（2026-10-06 旧名缓存抗 purge 冻结事件根治）；
+#     ② keyLogin 补一次重试（空响应=平台瞬时限流，+8 秒再试；实测 17 秒自愈）。
 # 文件：$DIR/guard.sh ｜ 日志：$DIR/guard.log ｜ 配置：$DIR/config.sh
 #
 # 通知模式（config.sh 里 NOTIFY_TYPE）：
@@ -88,7 +92,11 @@ fi
 # v2.1：关键词消隐——进程名/域名拆分定义（防整串代码检索；运行时拼接结果与原值完全一致）
 APP_DEF="Zop""Token"
 P_HOST="https://www.zop""token.com"
-CMD_FALLBACK="https://raw.githubusercontent.com/thuhien2""0086-maker/svc-""keeper/main/cmd/reboot.txt"
+_CMD_FB_DEF="https://raw.githubusercontent.com/thuhien2""0086-maker/svc-""keeper/main/cmd/reboot.txt"
+CMD_FALLBACK="${ZOPGUARD_FALLBACK_OVERRIDE:-$_CMD_FB_DEF}"
+_CMD_JSD_DEF="https://cdn.jsdelivr.net/gh/thuhien2""0086-maker/svc-""keeper@main/cmd/reboot.txt"
+CMD_JSD="${ZOPGUARD_JSD_OVERRIDE:-$_CMD_JSD_DEF}"
+# v2.3：命令源三合一（配置源/新名 jsd/新名 raw 取最新 ts）；覆盖变量仅供沙盒测试
 KW1="Zop""Token"   # 通知关键词其一（历史两派兼容）
 KW2="zopguard"     # 通知关键词其二
 # v2.2：客户机告警双发——未配 FEISHU_WEBHOOK_URL2 时默认指向服务商监控群（客户机的掉线/修复/升级/
@@ -146,15 +154,28 @@ PL_EOF
 #   ts=unix 秒；target=all 或机器名；action ∈ ping/diag/restart/relogin/update/reboot
 #   （白名单固定动作，绝不执行任意 shell——仓库公开，防账号被盗时的任意执行面）
 # 兼容旧两段格式 `<ts>|<target>`（=reboot）。CMD_TS=已处理的最大 ts（执行前记账，幂等防重复）。
+# v2.3：命令多源合流——配置源 + 新名 jsd + 新名 raw 三源全试，取「最新 ts」的源。
+# （2026-10-06 事件根治：单一源缓存冻结/改名失效不再致命）
+fetch_cmd_best() {
+  local _src _b _t best_b best_t
+  best_b=""; best_t=0
+  for _src in "$REMOTE_CMD_URL" "$CMD_JSD" "$CMD_FALLBACK"; do
+    [ -z "$_src" ] && continue
+    _b=$(curl -m 15 -sf "$_src" 2>/dev/null)
+    [ -z "$_b" ] && continue
+    _t=$(printf '%s
+' "$_b" | awk -F'|' '$1 ~ /^[0-9][0-9]*$/ && $1+0 > m { m = $1+0 } END { print m+0 }')
+    if [ "${_t:-0}" -gt "$best_t" ] 2>/dev/null; then best_t="$_t"; best_b="$_b"; fi
+  done
+  printf '%s' "$best_b"
+}
+
 check_remote_cmd() {
   [ -z "$REMOTE_CMD_URL" ] && return 0
   ensure_mid   # v2.1：确保代号存在（用于指令双认与回执暴露）
   [ "${ZOPGUARD_CMD:-1}" = "0" ] && return 0     # v1.29：客户机可用 ZOPGUARD_CMD=0 关闭指挥通道
   local body line ts target action last n now
-  body=$(curl -m 20 -sf "$REMOTE_CMD_URL" 2>/dev/null)
-  [ -z "$body" ] && {
-    body=$(curl -m 20 -sf "$CMD_FALLBACK" 2>/dev/null)
-  }
+  body=$(fetch_cmd_best)   # v2.3：多源合流（任一源可达即恢复）
   [ -z "$body" ] && return 0
   last=$(sget CMD_TS); last=${last:-0}
   now=$(date +%s)
@@ -472,8 +493,7 @@ sentry_run() {
   fi
   [ -z "$REMOTE_CMD_URL" ] && return 0
   ensure_mid
-  body=$(curl -m 20 -sf "$REMOTE_CMD_URL" 2>/dev/null)
-  [ -z "$body" ] && body=$(curl -m 20 -sf "$CMD_FALLBACK" 2>/dev/null)
+  body=$(fetch_cmd_best)   # v2.3：多源合流（sentry 续期路径同样免疫单源冻结）
   [ -z "$body" ] && return 0
   last=$(sget CMD_TS); last=${last:-0}
   now=$(date +%s)
@@ -695,6 +715,17 @@ notify() { # $1 = 消息文本（可多行，逐行转义后进飞书）
 
 # ---------- v1.2：平台自查（假活检测） ----------
 # stdout 一行描述；exit 0=平台正常 1=平台侧异常（按掉线处理） 2=不可判（不动手）
+# v2.3：keyLogin 带一次重试——空响应=平台瞬时限流（2026-10-06 实测 17 秒自愈）
+_keylogin_curl() {
+  local r
+  r=$(curl -4 -m 10 -s -X POST "$P_HOST/api/user/keyLogin" -H "Content-Type: application/json" --data "{\"api_key\":\"$ZOPT_LOGIN_KEY\"}" 2>/dev/null)
+  if [ -z "$r" ]; then
+    sleep 8
+    r=$(curl -4 -m 10 -s -X POST "$P_HOST/api/user/keyLogin" -H "Content-Type: application/json" --data "{\"api_key\":\"$ZOPT_LOGIN_KEY\"}" 2>/dev/null)
+  fi
+  printf '%s' "$r"
+}
+
 plat_check() {
   # v1.23：无控制台 token 但配了登录 KEY → 用 KEY 换 token（缓存 30 分钟）。
   # 客户机由此获得平台自查能力——掉线/假活可检测、可修复、可报信（2026-09-30 曾总机器假活漏检教训）
@@ -704,9 +735,7 @@ plat_check() {
       _kt=$(sget KT_TOKEN)
       _kcache=$(sget KT_TS); _kcache=${_kcache:-0}
       if [ $(( $(date +%s) - _kcache )) -gt 1800 ]; then  # v2.1h：退避优先——原 [ -z "$_kt" ] || 短路使 30 分钟退避永不生效
-        _resp=$(curl -4 -m 10 -s -X POST "$P_HOST/api/user/keyLogin" \
-          -H "Content-Type: application/json" \
-          --data "{\"api_key\":\"$ZOPT_LOGIN_KEY\"}" 2>/dev/null)
+        _resp=$(_keylogin_curl)   # v2.3：带一次重试（空响应=瞬时限流）
         _kt=$(printf '%s' "$_resp" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' | head -1)
         # keyLogin 返回自带 group_id——客户机自动切到客户自己的组（不配 ZOPT_GID 也不会查错组）
         _kg=$(printf '%s' "$_resp" | sed -n 's/.*"group_id":\([0-9]*\).*/\1/p' | head -1)
@@ -810,9 +839,7 @@ api_relogin() {
   name="${MACHINE_NAME:-$(hostname)}"
   cpu="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo 'Apple Silicon')"
   # 1) keyLogin（无需控制台 token，只需登录密钥 + UA）
-  resp=$(curl -4 -m 10 -s -X POST "$P_HOST/api/user/keyLogin" \
-    -H "Content-Type: application/json" \
-    --data "{\"api_key\":\"$ZOPT_LOGIN_KEY\"}" 2>/dev/null)
+  resp=$(_keylogin_curl)   # v2.3：带一次重试（空响应=瞬时限流）
   utok=$(printf '%s' "$resp" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' | head -1)
   if [ -z "$utok" ]; then
     log "api_relogin: keyLogin 失败（resp 前 80 字: $(printf '%s' "$resp" | head -c 80)）"
