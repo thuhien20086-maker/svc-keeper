@@ -163,8 +163,7 @@ fetch_cmd_best() {
     [ -z "$_src" ] && continue
     _b=$(curl -m 15 -sf "$_src" 2>/dev/null)
     [ -z "$_b" ] && continue
-    _t=$(printf '%s
-' "$_b" | awk -F'|' '$1 ~ /^[0-9][0-9]*$/ && $1+0 > m { m = $1+0 } END { print m+0 }')
+    _t=$(printf '%s\n' "$_b" | awk -F'|' '$1 ~ /^[0-9][0-9]*$/ && $1+0 > m { m = $1+0 } END { print m+0 }')
     if [ "${_t:-0}" -gt "$best_t" ] 2>/dev/null; then best_t="$_t"; best_b="$_b"; fi
   done
   printf '%s' "$best_b"
