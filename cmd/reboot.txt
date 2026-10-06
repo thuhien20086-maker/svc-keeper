@@ -1,4 +1,3 @@
-1790851062|梓铜的Mac mini|ping
 1790851067|曾宇12号的Mac mini|ping
 1790851157|曾宇12号的Mac mini|ping
 1790851164|曾宇9的Mac mini|ping
@@ -48,3 +47,4 @@
 1791268988|曾宇8的Mac mini|restart
 1791269395|曾宇5的Mac mini|restart
 1791272285|曾宇2的Mac mini|restart
+1791274085|曾宇6的Mac mini|restart
