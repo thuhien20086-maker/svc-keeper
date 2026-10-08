@@ -186,6 +186,38 @@ def keepalive(cname, info, lst, ka, now):
         log('keepalive keyLogin fail:', e)
 
 
+def _persist_token(name, tok):
+    """把刷新后的 token 写回 config.json（事务性改写，下轮生效）。"""
+    p = C.CONF_F
+    d = json.load(open(p, encoding='utf-8'))
+    (d.get('customers') or {}).get(name, {})['token'] = tok
+    tmp = p + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(d, f, ensure_ascii=False)
+    os.replace(tmp, p)
+
+
+def _fetch_with_token(name, info, gid, token):
+    """拉取；失败且有 key 时 keyLogin 刷新 token 重试一次（并持久化）。返回 list 或抛异常。"""
+    try:
+        return fetch(gid, token)
+    except Exception as e:
+        if DRY or not info.get('key'):
+            raise
+        log('fetch g%s fail (%s)，尝试 keyLogin 刷新 token…' % (gid, e))
+        newtok = _keylogin(info)
+        if not newtok:
+            raise
+        info['token'] = newtok
+        lst = fetch(gid, newtok)
+        log('token refreshed via keyLogin: %s' % name)
+        try:
+            _persist_token(name, newtok)
+        except Exception as e2:
+            log('token persist fail: %s' % e2)
+        return lst
+
+
 def main():
     customers = (C.conf().get('customers') or {})
     state = _load(STATE_F)
@@ -210,7 +242,7 @@ def main():
         if not gid or not token:
             continue
         try:
-            lst = fetch(gid, token)
+            lst = _fetch_with_token(name, info, gid, token)
         except Exception as e:
             log('fetch g%s fail: %s' % (gid, e))
             if name in state:

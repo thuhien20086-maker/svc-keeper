@@ -140,10 +140,11 @@ def cust_hooks():
 
 
 def hook_for(text):
-    """按消息里的 [客户名] 路由到各自群；无匹配回退 env 兜底群。"""
-    for nm, hk in cust_hooks().items():
-        if hk and ('[%s]' % nm) in text:
-            return hk
+    """按消息里的 [客户名] 路由到各自群；条目 webhook 为空 = 只私聊不进群（如「自用机」）；
+    完全无匹配才回退 env 兜底群（历史单群时代）。"""
+    for nm, inf in (conf().get('customers') or {}).items():
+        if ('[%s]' % nm) in text:
+            return (inf.get('webhook') or '').strip()
     return (conf().get('env') or {}).get('CHAIN_WATCH_GROUP_HOOK', '')
 
 
