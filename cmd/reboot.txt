@@ -1,4 +1,3 @@
-1791423222|曾宇2的Mac mini|restart
 1791424425|曾宇2的Mac mini|restart
 1791427782|曾宇1的Mac mini|restart
 1791428502|曾宇6的Mac mini|restart
@@ -48,3 +47,4 @@
 1791442891|钟兴华06的Mac mini|ping
 1791442891|钟兴华13的Mac mini|ping
 1791442891|曾宇1的Mac mini|restart
+1791442900|钟兴华027的Mac mini|diag
