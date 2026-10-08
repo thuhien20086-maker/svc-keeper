@@ -6,9 +6,9 @@
 # 可选：ZG_WATCHDOG_DIR（默认 ~/zg-watchdog）；ZG_INSTALL_DRY=1（本地测试：不装 launchd、不试跑、不发消息）
 set -u
 
-VERSION="1.0"
+VERSION="1.0.2"
 DIR="${ZG_WATCHDOG_DIR:-$HOME/zg-watchdog}"
-BASES="https://cdn.jsdelivr.net/gh/thuhien20086-maker/svc-keeper@main/watchdog https://raw.githubusercontent.com/thuhien20086-maker/svc-keeper/main/watchdog"
+BASES="https://raw.githubusercontent.com/thuhien20086-maker/svc-keeper/main/watchdog https://cdn.jsdelivr.net/gh/thuhien20086-maker/svc-keeper@main/watchdog"
 
 say() { printf '%s\n' "$*"; }
 
