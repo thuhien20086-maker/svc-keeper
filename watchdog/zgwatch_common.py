@@ -180,11 +180,14 @@ def send_hook(hook, text):
         return False
 
 
-def notify(text, dm_too=True):
-    """客户群（按路由）+ 私聊。返回 (群ok, 私聊ok)。"""
+def notify(text, dm_too=False):
+    """按路由进群；仅在无群可进或群发送失败时才私聊兜底（防刷屏又防丢）。
+    2026-10-08：客户消息不再默认私聊——私聊通道修好后旧「双发」设计会连刷 Hermes 私聊。"""
     hook = hook_for(text)
-    gok = send_hook(hook, text) if hook else True
-    dok = dm(text) if dm_too else True
+    gok = send_hook(hook, text) if hook else False
+    dok = True
+    if not gok:
+        dok = dm(text)
     log('common', 'notify:', text)
     return gok, dok
 

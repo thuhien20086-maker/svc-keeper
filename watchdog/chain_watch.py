@@ -161,11 +161,10 @@ def fmt(x):
 
 
 def push_lark(msg):
-    """私聊龙哥（飞书应用直发）；成功 → 客户群按路由同步（未配置 hook 时静默跳过）。"""
-    ok = C.dm(msg)
-    if ok:
-        push_group(msg)
-    return ok
+    """群优先（按路由分流）；群发送失败才私聊兜底（防刷屏又防丢）。"""
+    if push_group(msg):
+        return True
+    return C.dm(msg)
 
 
 def push_group(msg):
