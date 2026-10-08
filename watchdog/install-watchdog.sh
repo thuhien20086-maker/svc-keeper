@@ -15,13 +15,19 @@ say() { printf '%s\n' "$*"; }
 say "== 观察台安装器 v$VERSION =="
 say "目录: $DIR"
 
-# 0) python3 检查
+# 0) python3 检查（存在 ≠ 能用：未装 Command Line Tools 时 /usr/bin/python3 是占位符）
 PY="$(command -v python3 || true)"
 if [ -z "$PY" ]; then
   say "❌ 未找到 python3。请先运行: xcode-select --install  然后再跑一次本安装。"
   exit 1
 fi
-say "python3: $PY ($("$PY" -V 2>&1))"
+if ! "$PY" -c 'import json,sys' >/dev/null 2>&1; then
+  say "❌ python3 当前不可用 —— 这台机器还没装命令行开发工具（Command Line Tools）。"
+  say "   如果屏幕上有「正在安装软件」窗口：等它装完（约几分钟），再把本命令整行重跑一遍即可。"
+  say "   如果没有：先运行  xcode-select --install  装完后再重跑本命令。"
+  exit 1
+fi
+say "python3: $PY ($("$PY" -V 2>&1 | head -1))"
 
 # 1) 解包配置
 if [ -z "${ZG_CONF_B64:-}" ]; then
