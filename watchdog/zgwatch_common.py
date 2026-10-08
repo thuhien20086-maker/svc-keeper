@@ -108,7 +108,7 @@ def dm(text):
         if not tok:
             log('common', 'dm fail: 无 tenant_access_token')
             return False
-        uid = (conf().get('env') or {}).get('LARK_USER') or 'ou_dc82a9cdf7f1c2042c78274b8c2dc67e'
+        uid = (conf().get('env') or {}).get('LARK_USER') or 'ou_2c8343067d6cbc1f887a304f373731bf'
         req = urllib.request.Request(
             'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id',
             data=json.dumps({'receive_id': uid, 'msg_type': 'text',

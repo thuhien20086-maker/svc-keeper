@@ -133,6 +133,6 @@ fi
 
 say ""
 say "===== 部署完成 ====="
-say "监控目录: $DIR（bin=代码 config=配置 logs=日志 state=状态）"
+say "监控目录: ${DIR}（bin=代码 config=配置 logs=日志 state=状态）"
 say "查看运行: tail -f $DIR/logs/customer_watch.log"
 say "停用: launchctl bootout gui/$UID_/com.zgwatch.customer; launchctl bootout gui/$UID_/com.zgwatch.chain"
