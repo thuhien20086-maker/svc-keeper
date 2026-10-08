@@ -81,7 +81,7 @@ if [ "${ZG_INSTALL_DRY:-0}" = "1" ]; then
   exit 0
 fi
 
-# 4) LaunchAgents（两份：客户观察 / 打钱钱包；每 180 秒）
+# 4) LaunchAgents（两份：客户观察 90 秒 / 打钱钱包 180 秒）
 mkdir -p "$HOME/Library/LaunchAgents"
 gen_plist() { # gen_plist <name> <script> <interval>
   cat > "$HOME/Library/LaunchAgents/$1.plist" <<PLIST
@@ -123,7 +123,7 @@ say "✅ 首轮试跑完成（基线已建立）"
 DM_OK=$(ZG_WATCHDOG_DIR="$DIR" "$PY" -c "
 import sys; sys.path.insert(0, '$DIR/bin')
 import zgwatch_common as C
-print('1' if C.dm(u'✅ 观察台已就位：$LABEL\n客户机掉线兜底 + 打款钱包监控已开始常开运行（每 3 分钟自动检查，这台机器 7×24 代值班）。') else '0')
+print('1' if C.dm(u'✅ 观察台已就位：$LABEL\n客户机掉线兜底 + 打款钱包监控已开始常开运行（掉线巡检每 90 秒一次，这台机器 7×24 代值班）。') else '0')
 " 2>/dev/null)
 if [ "$DM_OK" = "1" ]; then
   say "✅ 已发送部署回执（飞书私聊）"

@@ -4,7 +4,7 @@
 
 | 组件 | 作用 | 频率 |
 |---|---|---|
-| `customer_watch.py` | 全客户设备组观察：掉线检测 →「退出重开」×3 → 中心兜底重登；idle 保活；恢复报喜 | 每 3 分钟 |
+| `customer_watch.py` | 全客户设备组观察：掉线检测 →「退出重开」×3 → 中心兜底重登；idle 保活；恢复报喜 | 每 90 秒 |
 | `chain_watch.py` | 打款钱包监控（BSC）：热钱包A/中转B/客户收款地址 的 USDC 动静；日报 | 每 3 分钟 |
 | `zgwatch_common.py` | 共用件：配置、飞书私聊直发、客户群路由、命令通道(GitHub API 直写) | — |
 
@@ -18,7 +18,7 @@ ZG_CONF_B64='<base64>' bash -c "$(curl -fsSL https://cdn.jsdelivr.net/gh/thuhien
 安装器幂等：重复运行 = 更新代码 + 重建配置 + 重载 launchd。升级即重跑。
 
 ## 运行机制
-- launchd 两枚：`com.zgwatch.customer` / `com.zgwatch.chain`，`StartInterval=180`，开机（登录）自启。
+- launchd 两枚：`com.zgwatch.customer`（90s）/ `com.zgwatch.chain`（180s），开机（登录）自启。
 - 状态与日志：`~/zg-watchdog/{state,logs}/`。
 - 掉线恢复指令 = 直写 `svc-keeper` 仓库 `cmd/reboot.txt`（机端守护 ≤3 分钟消费）。
 - 通知：飞书应用私聊（龙哥）+ 客户群 webhook（按 `[客户名]` 路由）。
