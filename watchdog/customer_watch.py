@@ -219,6 +219,9 @@ def _fetch_with_token(name, info, gid, token):
 
 
 def main():
+    if not C.claim('customer_watch'):
+        print('SKIP: previous run still active')
+        return
     customers = (C.conf().get('customers') or {})
     state = _load(STATE_F)
     sn_map = _load(SNMAP_F)

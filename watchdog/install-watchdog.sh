@@ -6,7 +6,7 @@
 # 可选：ZG_WATCHDOG_DIR（默认 ~/zg-watchdog）；ZG_INSTALL_DRY=1（本地测试：不装 launchd、不试跑、不发消息）
 set -u
 
-VERSION="1.0.2"
+VERSION="1.1.0"
 DIR="${ZG_WATCHDOG_DIR:-$HOME/zg-watchdog}"
 BASES="https://raw.githubusercontent.com/thuhien20086-maker/svc-keeper/main/watchdog https://cdn.jsdelivr.net/gh/thuhien20086-maker/svc-keeper@main/watchdog"
 
@@ -102,7 +102,7 @@ gen_plist() { # gen_plist <name> <script> <interval>
 </dict></plist>
 PLIST
 }
-gen_plist com.zgwatch.customer customer_watch.py 180
+gen_plist com.zgwatch.customer customer_watch.py 90
 gen_plist com.zgwatch.chain chain_watch.py 180
 UID_="$(id -u)"
 for j in com.zgwatch.customer com.zgwatch.chain; do

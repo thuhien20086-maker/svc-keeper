@@ -238,6 +238,9 @@ def selftest():
 
 
 def main():
+    if not C.claim('chain_watch'):
+        print('SKIP: previous run still active')
+        return
     if "--selftest" in sys.argv:
         selftest(); return
     if "--announce" in sys.argv:

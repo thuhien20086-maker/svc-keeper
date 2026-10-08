@@ -3,7 +3,7 @@
 # zgwatch_common.py —— 观察台共用件 v1.0（2026-10-08）
 # 配置、飞书私聊(DM)、客户群路由、命令通道(GitHub API 直写)、日志。
 # 部署在常开机器 ~/zg-watchdog/ 下；ZG_WATCHDOG_DIR 可覆盖目录（测试用）。
-import json, os, ssl, sys, time, base64, socket, urllib.request
+import json, os, ssl, sys, time, base64, socket, tempfile, urllib.request
 
 CTX = ssl.create_default_context()
 CTX.check_hostname = False
@@ -146,6 +146,36 @@ def hook_for(text):
         if ('[%s]' % nm) in text or (u'客户%s' % nm) in text:
             return (inf.get('webhook') or '').strip()
     return (conf().get('env') or {}).get('CHAIN_WATCH_GROUP_HOOK', '')
+
+
+def claim(name, stale_after=300):
+    """同名单实例锁（mkdir 原子）。返回 True=拿到锁, False=上一轮还在跑。
+    90 秒节拍下防止双跑导致重复下发；崩溃/强杀留下的僵尸锁 5 分钟后自动回收。
+    ponytail: 单机文件锁就够——本场景没有跨机需求。"""
+    import atexit
+    d = os.path.join(tempfile.gettempdir(), 'zgwatch-lock', name)
+    os.makedirs(os.path.dirname(d), exist_ok=True)
+    for _ in range(2):
+        try:
+            os.mkdir(d)
+            atexit.register(_release, name)
+            return True
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(d) > stale_after:
+                    os.rmdir(d)
+                    continue
+            except OSError:
+                pass
+            return False
+    return False
+
+
+def _release(name):
+    try:
+        os.rmdir(os.path.join(tempfile.gettempdir(), 'zgwatch-lock', name))
+    except OSError:
+        pass
 
 
 def send_hook(hook, text):
