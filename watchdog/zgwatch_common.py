@@ -151,6 +151,22 @@ def hook_for(text):
 def send_hook(hook, text):
     if not hook:
         return True
+    if hook.startswith('appchat:'):
+        # 应用直发群（自用机监控群；应用身份，无需自定义机器人 webhook）
+        cid = hook.split(':', 1)[1].strip()
+        try:
+            tok = _feishu_token()
+            req = urllib.request.Request(
+                'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id',
+                data=json.dumps({'receive_id': cid, 'msg_type': 'text',
+                                 'content': json.dumps({'text': text})}).encode(),
+                headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + tok})
+            d = json.loads(_urlopen(req, 15).read().decode())
+            return d.get('code') == 0
+        except Exception as e:
+            log('common', 'appchat send fail: %s' % e)
+            return False
+    # 自定义机器人 webhook：群机器人关键词必须是 zopguard
     if 'zopguard' not in text and 'ZopToken' not in text:
         text = text + '\n[zopguard]'
     try:
