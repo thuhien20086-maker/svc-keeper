@@ -30,3 +30,4 @@
 1791770815|钟兴华025的Mac mini|restart
 1791771098|龙哥的Mac mini|diag
 1791771100|龙哥2的Mac mini|diag
+1791771229|曾宇10的Mac mini|restart
