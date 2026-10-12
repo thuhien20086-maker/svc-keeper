@@ -42,3 +42,4 @@
 1791774097|钟兴华30的Mac mini|restart
 1791774302|钟兴华024的Mac mini|restart
 1791774905|钟兴华11的Mac mini|restart
+1791774907|钟兴华13的Mac mini|restart
