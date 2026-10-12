@@ -25,7 +25,8 @@ DEVINIT_URL = 'https://www.zoptoken.com/api/device/init'
 RELOGIN_COOL = 3600           # 每台兜底冷却（秒）
 RELOGIN_MAX_PER_DAY = 3       # 达到时仅插播「频繁掉线」提示，不暂停
 RESTART_MAX = 3               # 「退出重开」最大下发次数
-RESTART_INT = 8 * 60          # 两次下发最小间隔（秒）
+RESTART_INT = 20 * 60         # 两次下发最小间隔（秒）【2026-10-12 止血：8→20，防重启风暴】
+RESTART_ROLL = 6              # 滚动 24h 内每台最多下发次数【2026-10-12 止血：防"恢复即重置"导致的无限循环】
 KEEPALIVE_INT = 25 * 60       # idle 保活间隔（秒）
 DRY = '--dry' in sys.argv     # 彩排模式：只打印/记录将做的动作，不发请求
 
@@ -92,7 +93,8 @@ def drop_handle(cname, info, dn, sn_map, cd, sc, rc, now, today):
     """掉线处理链：①「退出重开」×3（间隔 8 分钟）→ ②其他兜底 center_fix(device/init)。"""
     out = []
     rc_today = [t for t in rc.get(dn, []) if time.strftime('%F', time.localtime(t)) == today]
-    if len(rc_today) < RESTART_MAX:
+    rc_roll = [t for t in rc.get(dn, []) if now - t < 86400]   # 滚动 24h 计数（不因恢复重置）
+    if len(rc_today) < RESTART_MAX and len(rc_roll) < RESTART_ROLL:
         if now - (rc.get(dn) or [0])[-1] >= RESTART_INT:
             if DRY:
                 rc.setdefault(dn, []).append(now)
@@ -280,7 +282,8 @@ def main():
         # ④ 恢复报喜
         for dn in cur:
             if cur[dn] == 'healthy':
-                rc.pop(dn, None)   # 上线即重置「退出重开」名额
+                pass   # 2026-10-12 止血：不再"上线即重置"——防"重启→上线→再掉→再重启"无限循环；
+                       # 名额交回每日 3 次 + 滚动 24h ≤6 次 双上限管理
             if dn in prev and prev[dn] != 'healthy' and cur[dn] == 'healthy':
                 msgs.append('✅ [%s] 机器 %s 已恢复上线（healthy）。' % (name, dn))
             elif prev and cur[dn] == 'healthy' and dn not in prev:
