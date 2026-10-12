@@ -16,6 +16,7 @@ import zgwatch_common as C
 STATE_F = os.path.join(C.STATE_DIR, '.customer_watch_state.json')
 SNMAP_F = os.path.join(C.STATE_DIR, '.customer_watch_sn.json')
 RESTART_RC_F = os.path.join(C.STATE_DIR, '.customer_restart_rc.json')
+CN_F = os.path.join(C.STATE_DIR, '.customer_cap_notified.json')  # 配额用尽提示去重（2026-10-12，每机 24h 一次）
 CD_F = os.path.join(C.STATE_DIR, '.customer_relogin_cd.json')
 SC_F = os.path.join(C.STATE_DIR, '.customer_relogin_sc.json')
 KA_F = os.path.join(C.STATE_DIR, '.customer_keepalive.json')
@@ -89,8 +90,8 @@ def send_restart(dn):
     return C.push_cmd(dn, 'restart')
 
 
-def drop_handle(cname, info, dn, sn_map, cd, sc, rc, now, today):
-    """掉线处理链：①「退出重开」×3（间隔 8 分钟）→ ②其他兜底 center_fix(device/init)。"""
+def drop_handle(cname, info, dn, sn_map, cd, sc, rc, cap, now, today):
+    """掉线处理链：①「退出重开」（20 分钟节流、24h≤6 次）→ ②配额用尽转长期恢复（一次提示）+ 中心兜底 center_fix。"""
     out = []
     rc_today = [t for t in rc.get(dn, []) if time.strftime('%F', time.localtime(t)) == today]
     rc_roll = [t for t in rc.get(dn, []) if now - t < 86400]   # 滚动 24h 计数（不因恢复重置）
@@ -105,8 +106,13 @@ def drop_handle(cname, info, dn, sn_map, cd, sc, rc, now, today):
                            % (cname, dn, len(rc_today) + 1, RESTART_MAX))
             else:
                 out.append('🔧 [%s] %s 掉线：远程「退出重开」下发失败（命令通道未响应），下轮自动重试。' % (cname, dn))
-        return out  # 距上次下发不足 8 分钟：静默等待
-    return center_fix(cname, info, dn, sn_map, cd, sc, now, today)
+        return out  # 距上次下发不足 20 分钟：静默等待
+    # 配额用尽（2026-10-12）：转长期恢复模式——机端自愈 + 中心重登兜底；每机 24h 提示一次
+    if now - (cap.get(dn) or 0) > 86400:
+        cap[dn] = now
+        out.append(u'🟠 [%s] %s 重启配额已用尽（24h 内 %d 次），转长期恢复模式：机端自愈持续工作 + 中心重登每小时兜底；若长时间仍不在线，建议人工检查该机。'
+                   % (cname, dn, len(rc_roll)))
+    return out + center_fix(cname, info, dn, sn_map, cd, sc, now, today)
 
 
 def center_fix(cname, info, dn, sn_map, cd, sc, now, today):
@@ -228,6 +234,7 @@ def main():
     state = _load(STATE_F)
     sn_map = _load(SNMAP_F)
     rc = _load(RESTART_RC_F)
+    cap = _load(CN_F)
     cd = _load(CD_F)
     sc = _load(SC_F)
     ka = _load(KA_F)
@@ -269,16 +276,16 @@ def main():
         for dn in prev:
             if dn not in cur:  # 上轮在、这轮消失（平台改版：离线设备不列出）
                 msgs.append('⚠️ [%s] 机器 %s 掉线了（平台列表已消失），守护正在自动恢复…' % (name, dn))
-                msgs += drop_handle(name, info, dn, sn_map, cd, sc, rc, now, today)
+                msgs += drop_handle(name, info, dn, sn_map, cd, sc, rc, cap, now, today)
         # ②b 持续缺席也推进兜底链（动作自带节流；按 'cust' 归属过滤防串）
         for dn in list(sn_map):
             if (sn_map.get(dn) or {}).get('cust') == name and dn not in cur and dn not in prev:
-                msgs += drop_handle(name, info, dn, sn_map, cd, sc, rc, now, today)
+                msgs += drop_handle(name, info, dn, sn_map, cd, sc, rc, cap, now, today)
         # ③ 在线但 state 异常（非 working 才兜底）
         for dn, st in cur.items():
             if st != 'healthy' and str((full.get(dn) or {}).get('runtime_state') or '') != 'working':
                 msgs.append('⚠️ [%s] 机器 %s 状态异常（%s），处理中…' % (name, dn, st))
-                msgs += drop_handle(name, info, dn, sn_map, cd, sc, rc, now, today)
+                msgs += drop_handle(name, info, dn, sn_map, cd, sc, rc, cap, now, today)
         # ④ 恢复报喜
         for dn in cur:
             if cur[dn] == 'healthy':
@@ -298,7 +305,7 @@ def main():
                 log('notify(DRY):', m)
             else:
                 C.notify(m)   # 客户群（按路由）+ 私聊
-    for f, d in ((STATE_F, new_state), (SNMAP_F, sn_map), (RESTART_RC_F, rc), (CD_F, cd), (SC_F, sc), (KA_F, ka)):
+    for f, d in ((STATE_F, new_state), (SNMAP_F, sn_map), (RESTART_RC_F, rc), (CN_F, cap), (CD_F, cd), (SC_F, sc), (KA_F, ka)):
         _dump_atomic(f, d)
     if not msgs:
         print('NOOP')
