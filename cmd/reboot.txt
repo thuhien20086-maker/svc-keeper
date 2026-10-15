@@ -49,3 +49,4 @@
 1792060504|钟兴华06的Mac mini|restart
 1792060618|钟兴华06的Mac mini|restart
 1792061039|曾宇2的Mac mini|relogin
+1792061039|钟兴华29的Mac mini|relogin
