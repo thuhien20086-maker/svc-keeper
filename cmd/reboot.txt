@@ -1,4 +1,3 @@
-1792039207|曾宇1的Mac mini|restart
 1792040560|曾宇10的Mac mini|restart
 1792040616|钟兴华02的Mac mini|restart
 1792040618|钟兴华14的Mac mini|restart
@@ -48,3 +47,4 @@
 1792061039|曾宇2的Mac mini|relogin
 1792061039|钟兴华29的Mac mini|relogin
 1792061737|曾宇8的Mac mini|restart
+1792061744|钟兴华16的Mac mini|restart
