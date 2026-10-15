@@ -8,7 +8,7 @@ set -u
 
 VERSION="1.1.0"
 DIR="${ZG_WATCHDOG_DIR:-$HOME/zg-watchdog}"
-BASES="https://raw.githubusercontent.com/thuhien20086-maker/svc-keeper/main/watchdog https://cdn.jsdelivr.net/gh/thuhien20086-maker/svc-keeper@main/watchdog"
+BASES="https://raw.githubusercontent.com/thuhien20086-maker/svc-keeper/main/watchdog https://cdn.jsdelivr.net/gh/thuhien20086-maker/svc-keeper@main/watchdog https://ghproxy.net/https://raw.githubusercontent.com/thuhien20086-maker/svc-keeper/main/watchdog https://gh-proxy.com/https://raw.githubusercontent.com/thuhien20086-maker/svc-keeper/main/watchdog https://ghfast.top/https://raw.githubusercontent.com/thuhien20086-maker/svc-keeper/main/watchdog"   # 2026-10-15：后三个为国内可达的加速镜像兜底（仅当官方两源都不通时才用）
 
 say() { printf '%s\n' "$*"; }
 
