@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # customer_watch.py —— 客户机中心观察器 + 中心兜底（观察台版，2026-10-08 起）
+# v1.3.1（2026-10-15）：v1.3 + 心跳（每≥10分钟往 GitHub 写 watchdog/heartbeat/<名>.txt，供哨兵监控）
 # v1.3（2026-10-15）：中心重登前置——掉线先做 device/init 重登（"客户端会话被平台释放"类故障
 #   重启不对症、重登才对症；实战：025/钟12/13/29/曾宇2 一发即回列）；RELOGIN_COOL 3600→1800；
 #   无 sn 提示加冷却防刷屏。
@@ -20,6 +21,7 @@ STATE_F = os.path.join(C.STATE_DIR, '.customer_watch_state.json')
 SNMAP_F = os.path.join(C.STATE_DIR, '.customer_watch_sn.json')
 RESTART_RC_F = os.path.join(C.STATE_DIR, '.customer_restart_rc.json')
 CN_F = os.path.join(C.STATE_DIR, '.customer_cap_notified.json')  # 配额用尽提示去重（2026-10-12，每机 24h 一次）
+HB_NAME = (os.environ.get('ZG_HB_FILE') or 'center').strip()     # v1.3.1 心跳文件名（025=center；本地备份=backup-local）
 CD_F = os.path.join(C.STATE_DIR, '.customer_relogin_cd.json')
 SC_F = os.path.join(C.STATE_DIR, '.customer_relogin_sc.json')
 KA_F = os.path.join(C.STATE_DIR, '.customer_keepalive.json')
@@ -169,6 +171,41 @@ def center_fix(cname, info, dn, sn_map, cd, sc, now, today):
     return out
 
 
+def write_heartbeat(now, counts):
+    """v1.3.1：往 GitHub 写心跳（≥10 分钟节流）——本地哨兵据此判断"观察台是否在岗"。失败仅日志。"""
+    ts_f = os.path.join(C.STATE_DIR, '.hb_last')
+    try:
+        last = int((open(ts_f).read().strip() if os.path.exists(ts_f) else '0') or 0)
+    except Exception:
+        last = 0
+    if now - last < 600:
+        return
+    tok = ((C.conf().get('gh_token') or '')).strip()
+    if not tok:
+        return
+    body = '%d|%s|%s|obs-v1.3.1' % (int(now), time.strftime('%F %T'), json.dumps(counts, ensure_ascii=False, separators=(',', ':')))
+    try:
+        import urllib.request as _u, base64 as _b64
+        api = 'https://api.github.com/repos/thuhien20086-maker/svc-keeper/contents/watchdog/heartbeat/%s.txt' % HB_NAME
+        hdrs = {'Authorization': 'token ' + tok, 'User-Agent': 'zgwatch/1.0'}
+        sha = None
+        try:
+            r = json.loads(_u.urlopen(_u.Request(api, headers=hdrs), timeout=20).read().decode())
+            sha = r.get('sha')
+        except Exception:
+            pass
+        payload = {'message': 'heartbeat %s %d' % (HB_NAME, int(now)),
+                   'content': _b64.b64encode(body.encode()).decode()}
+        if sha:
+            payload['sha'] = sha
+        req = _u.Request(api, data=json.dumps(payload).encode(),
+                         headers=dict(hdrs, **{'Content-Type': 'application/json'}), method='PUT')
+        _u.urlopen(req, timeout=25).read()
+        open(ts_f, 'w').write(str(int(now)))
+    except Exception as e:
+        log('heartbeat fail:', e)
+
+
 def keepalive(cname, info, lst, ka, now):
     """对 idle+healthy 设备保活（25 分钟/台）；working 不碰；静默（只 log）。"""
     key = info.get('key') or ''
@@ -316,6 +353,8 @@ def main():
                 C.notify(m)   # 客户群（按路由）+ 私聊
     for f, d in ((STATE_F, new_state), (SNMAP_F, sn_map), (RESTART_RC_F, rc), (CN_F, cap), (CD_F, cd), (SC_F, sc), (KA_F, ka)):
         _dump_atomic(f, d)
+    if not DRY:
+        write_heartbeat(now, {k: len(v) for k, v in new_state.items()})
     if not msgs:
         print('NOOP')
 
