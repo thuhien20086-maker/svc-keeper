@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# customer_watch.py —— 客户机中心观察器 + 中心兜底（观察台版 v1.0，2026-10-08）
+# customer_watch.py —— 客户机中心观察器 + 中心兜底（观察台版，2026-10-08 起）
+# v1.3（2026-10-15）：中心重登前置——掉线先做 device/init 重登（"客户端会话被平台释放"类故障
+#   重启不对症、重登才对症；实战：025/钟12/13/29/曾宇2 一发即回列）；RELOGIN_COOL 3600→1800；
+#   无 sn 提示加冷却防刷屏。
 # 从笔记本版 zg_customer_watch.py v2.2 移植：逻辑原样，仅三处适配——
 #   ① 路径 → ~/zg-watchdog/{state,logs}；配置 → ~/zg-watchdog/config.json（含客户台账/飞书凭据）
 #   ② 私聊通知 → 飞书应用直发（原为 stdout 交 Hermes 投递）
 #   ③ 掉线「退出重开」下发 → 直写命令通道（GitHub API），不再依赖笔记本看板 :8757
 # 每 tick（3 分钟）拉所有客户的设备组列表，对比上轮：
-#   消失 = 掉线/被平台隐藏 → 发客户群 + 私聊告警 → ①「退出重开」×3（间隔 ≥8 分钟）→ ②中心兜底 device/init
+#   消失 = 掉线/被平台隐藏 → 发客户群 + 私聊告警 → ⓪中心重登 device/init（v1.3 前置）→ ①「退出重开」×3 → ②长期恢复提示
 #   idle 设备保活（25 分钟/台，只碰 idle 不碰 working）
 # 用法: python3 customer_watch.py [--dry]    # --dry 彩排：不发任何请求
 import json, os, sys, time
@@ -23,7 +26,7 @@ KA_F = os.path.join(C.STATE_DIR, '.customer_keepalive.json')
 API = 'https://www.zoptoken.com/api/console/device_group/devices'
 KEYLOGIN_URL = 'https://www.zoptoken.com/api/user/keyLogin'
 DEVINIT_URL = 'https://www.zoptoken.com/api/device/init'
-RELOGIN_COOL = 3600           # 每台兜底冷却（秒）
+RELOGIN_COOL = 1800           # 每台兜底冷却（秒）【v1.3：3600→1800，波浪日抢救提速】
 RELOGIN_MAX_PER_DAY = 3       # 达到时仅插播「频繁掉线」提示，不暂停
 RESTART_MAX = 3               # 「退出重开」最大下发次数
 RESTART_INT = 20 * 60         # 两次下发最小间隔（秒）【2026-10-12 止血：8→20，防重启风暴】
@@ -91,8 +94,11 @@ def send_restart(dn):
 
 
 def drop_handle(cname, info, dn, sn_map, cd, sc, rc, cap, now, today):
-    """掉线处理链：①「退出重开」（20 分钟节流、24h≤6 次）→ ②配额用尽转长期恢复（一次提示）+ 中心兜底 center_fix。"""
+    """掉线处理链 v1.3：⓪中心重登前置（对症）→ ①「退出重开」（20 分钟节流、24h≤6 次）→ ②长期恢复提示。"""
     out = []
+    # v1.3（2026-10-15）：中心重登前置——"客户端会话被平台释放"类掉线，重启不对症、重登才对症
+    # （025/钟12/13/29/曾宇2 实战：device/init 一发即回列；且重登无损、不打断客户端）
+    out += center_fix(cname, info, dn, sn_map, cd, sc, now, today)
     rc_today = [t for t in rc.get(dn, []) if time.strftime('%F', time.localtime(t)) == today]
     rc_roll = [t for t in rc.get(dn, []) if now - t < 86400]   # 滚动 24h 计数（不因恢复重置）
     if len(rc_today) < RESTART_MAX and len(rc_roll) < RESTART_ROLL:
@@ -112,7 +118,7 @@ def drop_handle(cname, info, dn, sn_map, cd, sc, rc, cap, now, today):
         cap[dn] = now
         out.append(u'🟠 [%s] %s 重启配额已用尽（24h 内 %d 次），转长期恢复模式：机端自愈持续工作 + 中心重登每小时兜底；若长时间仍不在线，建议人工检查该机。'
                    % (cname, dn, len(rc_roll)))
-    return out + center_fix(cname, info, dn, sn_map, cd, sc, now, today)
+    return out
 
 
 def center_fix(cname, info, dn, sn_map, cd, sc, now, today):
@@ -125,6 +131,9 @@ def center_fix(cname, info, dn, sn_map, cd, sc, now, today):
     meta = sn_map.get(dn) or {}
     sn = meta.get('sn')
     if not key or not sn:
+        if now - cd.get(dn, 0) < RELOGIN_COOL:   # v1.3：无 sn 提示也走冷却，防每轮刷屏
+            return out
+        cd[dn] = now
         out.append('🔧 [%s] %s 掉线：中心兜底不可用（%s），由机器端守护继续自动恢复。'
                    % (cname, dn, '无KEY' if not key else '无sn记录（首次快照后自动获得）'))
         return out
