@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # customer_watch.py —— 客户机中心观察器 + 中心兜底（观察台版，2026-10-08 起）
+# v1.3.2（2026-10-17）：重登成功后也设 30 分钟冷却（此前成功即清冷却 → 每轮重登风暴，实测两天 2484 次+客户群刷屏）
 # v1.3.1（2026-10-15）：v1.3 + 心跳（每≥10分钟往 GitHub 写 watchdog/heartbeat/<名>.txt，供哨兵监控）
 # v1.3（2026-10-15）：中心重登前置——掉线先做 device/init 重登（"客户端会话被平台释放"类故障
 #   重启不对症、重登才对症；实战：025/钟12/13/29/曾宇2 一发即回列）；RELOGIN_COOL 3600→1800；
@@ -159,7 +160,7 @@ def center_fix(cname, info, dn, sn_map, cd, sc, now, today):
         log('relogin device/init fail:', dn, e)
     if ok:
         sc.setdefault(dn, []).append(now)
-        cd.pop(dn, None)
+        cd[dn] = now   # v1.3.2：成功也设冷却——否则每轮都会重登（实测 2 天 2484 次 + 客户群刷屏）
         out.append('🔧 [%s] %s 掉线：中心已下发兜底重登（device/init 成功），恢复中。' % (cname, dn))
         if len(succ_today) + 1 == RELOGIN_MAX_PER_DAY:
             out.append('ℹ️ [%s] %s 今日已中心恢复 %d 次（频繁掉线）：继续自动恢复；若长期反复，建议排查该机网络。'
