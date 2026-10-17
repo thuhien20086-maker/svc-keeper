@@ -58,7 +58,7 @@ fetch() { # fetch <文件名> <目标路径>
   return 1
 }
 cd "$DIR/bin" || exit 1
-for f in zgwatch_common.py customer_watch.py chain_watch.py; do
+for f in zgwatch_common.py customer_watch.py chain_watch.py roster.json; do
   if fetch "$f" "$DIR/bin/$f"; then
     say "✅ 已就位: $f"
   else
