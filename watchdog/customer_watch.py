@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # customer_watch.py —— 客户机中心观察器 + 中心兜底（观察台版，2026-10-08 起）
+# v1.3.3（2026-10-17）：自更新——观察台每 ≥6h 查 watchdog/VERSION，新则拉两文件 py_compile 校验后原子替换（下轮生效）；从此不用手动重跑安装命令
 # v1.3.2（2026-10-17）：重登成功后也设 30 分钟冷却（此前成功即清冷却 → 每轮重登风暴，实测两天 2484 次+客户群刷屏）
 # v1.3.1（2026-10-15）：v1.3 + 心跳（每≥10分钟往 GitHub 写 watchdog/heartbeat/<名>.txt，供哨兵监控）
 # v1.3（2026-10-15）：中心重登前置——掉线先做 device/init 重登（"客户端会话被平台释放"类故障
@@ -23,6 +24,7 @@ SNMAP_F = os.path.join(C.STATE_DIR, '.customer_watch_sn.json')
 RESTART_RC_F = os.path.join(C.STATE_DIR, '.customer_restart_rc.json')
 CN_F = os.path.join(C.STATE_DIR, '.customer_cap_notified.json')  # 配额用尽提示去重（2026-10-12，每机 24h 一次）
 HB_NAME = (os.environ.get('ZG_HB_FILE') or 'center').strip()     # v1.3.1 心跳文件名（025=center；本地备份=backup-local）
+VERSION_LOCAL = '1.3.3'          # v1.3.3 自更新版本标记（与仓库 watchdog/VERSION 对应）
 CD_F = os.path.join(C.STATE_DIR, '.customer_relogin_cd.json')
 SC_F = os.path.join(C.STATE_DIR, '.customer_relogin_sc.json')
 KA_F = os.path.join(C.STATE_DIR, '.customer_keepalive.json')
@@ -172,6 +174,79 @@ def center_fix(cname, info, dn, sn_map, cd, sc, now, today):
     return out
 
 
+
+# ==== v1.3.3：自更新（观察台从此不用手动重跑安装命令） ====
+UPD_BASES = [
+    'https://raw.githubusercontent.com/thuhien20086-maker/svc-keeper/main/watchdog',
+    'https://cdn.jsdelivr.net/gh/thuhien20086-maker/svc-keeper@main/watchdog',
+    'https://ghproxy.net/https://raw.githubusercontent.com/thuhien20086-maker/svc-keeper/main/watchdog',
+    'https://gh-proxy.com/https://raw.githubusercontent.com/thuhien20086-maker/svc-keeper/main/watchdog',
+    'https://ghfast.top/https://raw.githubusercontent.com/thuhien20086-maker/svc-keeper/main/watchdog',
+]
+
+
+def _ver_tuple(v):
+    return tuple(int(x) for x in v.split('.') if x.isdigit()) or (0,)
+
+
+def auto_update(now):
+    """每 ≥6h 查 VERSION；有新则拉 customer_watch.py + zgwatch_common.py，py_compile 校验后原子替换（下轮起生效）。失败仅日志。"""
+    ts_f = os.path.join(C.STATE_DIR, '.upd_last')
+    try:
+        last = int((open(ts_f).read().strip() if os.path.exists(ts_f) else '0') or 0)
+    except Exception:
+        last = 0
+    if now - last < 6 * 3600:
+        return
+    try:
+        open(ts_f, 'w').write(str(int(now)))
+    except Exception:
+        pass
+    import urllib.request as _u
+    import py_compile
+
+    def fetch(base, rel):
+        r = _u.Request(base + '/' + rel, headers={'User-Agent': 'Mozilla/5.0'})
+        return _u.urlopen(r, timeout=45).read()
+
+    remote = ''
+    for b in UPD_BASES:
+        try:
+            remote = fetch(b, 'VERSION').decode().strip()
+            if remote:
+                break
+        except Exception:
+            continue
+    if not remote or _ver_tuple(remote) <= _ver_tuple(VERSION_LOCAL):
+        return
+    d = os.path.dirname(os.path.abspath(__file__))
+    for fn in ('zgwatch_common.py', 'customer_watch.py'):
+        data = None
+        for b in UPD_BASES:
+            try:
+                data = fetch(b, fn)
+                if data:
+                    break
+            except Exception:
+                continue
+        if not data or len(data) < 3000:
+            log('auto-update: 拉取不完整，放弃（%s）' % fn)
+            return
+        tmp = os.path.join(d, fn + '.new')
+        try:
+            open(tmp, 'wb').write(data)
+            py_compile.compile(tmp, doraise=True)
+            os.replace(tmp, os.path.join(d, fn))
+        except Exception as e:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+            log('auto-update: 校验/替换失败（%s）: %s' % (fn, e))
+            return
+    log('auto-update: 已更新到 v%s（下轮生效）' % remote)
+
+
 def write_heartbeat(now, counts):
     """v1.3.1：往 GitHub 写心跳（≥10 分钟节流）——本地哨兵据此判断"观察台是否在岗"。失败仅日志。"""
     ts_f = os.path.join(C.STATE_DIR, '.hb_last')
@@ -278,6 +353,7 @@ def main():
         print('SKIP: previous run still active')
         return
     customers = (C.conf().get('customers') or {})
+    auto_update(time.time())   # v1.3.3：自更新（≥6h 节流）
     state = _load(STATE_F)
     sn_map = _load(SNMAP_F)
     rc = _load(RESTART_RC_F)
