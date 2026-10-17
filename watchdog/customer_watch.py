@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # customer_watch.py —— 客户机中心观察器 + 中心兜底（观察台版，2026-10-08 起）
+# v1.3.4（2026-10-17）：心跳内容带真实版本号（obs-v<版本>）——远程即可确认在跑哪版
 # v1.3.3（2026-10-17）：自更新——观察台每 ≥6h 查 watchdog/VERSION，新则拉两文件 py_compile 校验后原子替换（下轮生效）；从此不用手动重跑安装命令
 # v1.3.2（2026-10-17）：重登成功后也设 30 分钟冷却（此前成功即清冷却 → 每轮重登风暴，实测两天 2484 次+客户群刷屏）
 # v1.3.1（2026-10-15）：v1.3 + 心跳（每≥10分钟往 GitHub 写 watchdog/heartbeat/<名>.txt，供哨兵监控）
@@ -24,7 +25,7 @@ SNMAP_F = os.path.join(C.STATE_DIR, '.customer_watch_sn.json')
 RESTART_RC_F = os.path.join(C.STATE_DIR, '.customer_restart_rc.json')
 CN_F = os.path.join(C.STATE_DIR, '.customer_cap_notified.json')  # 配额用尽提示去重（2026-10-12，每机 24h 一次）
 HB_NAME = (os.environ.get('ZG_HB_FILE') or 'center').strip()     # v1.3.1 心跳文件名（025=center；本地备份=backup-local）
-VERSION_LOCAL = '1.3.3'          # v1.3.3 自更新版本标记（与仓库 watchdog/VERSION 对应）
+VERSION_LOCAL = '1.3.4'          # v1.3.3 自更新版本标记（与仓库 watchdog/VERSION 对应）
 CD_F = os.path.join(C.STATE_DIR, '.customer_relogin_cd.json')
 SC_F = os.path.join(C.STATE_DIR, '.customer_relogin_sc.json')
 KA_F = os.path.join(C.STATE_DIR, '.customer_keepalive.json')
