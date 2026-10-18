@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # customer_watch.py —— 客户机中心观察器 + 中心兜底（观察台版，2026-10-08 起）
+# v1.3.6（2026-10-18）：重登冷却 1800→600（波浪日提速）+ 掉线类消息同机 2h 去重（快救但不刷群）
 # v1.3.5（2026-10-17）：名册固化——安装/自更新带 roster.json（32台），即使状态被清空也能识别"消失的机器"；auto_update 同时刷新 roster
 # v1.3.4（2026-10-17）：心跳内容带真实版本号（obs-v<版本>）——远程即可确认在跑哪版
 # v1.3.3（2026-10-17）：自更新——观察台每 ≥6h 查 watchdog/VERSION，新则拉两文件 py_compile 校验后原子替换（下轮生效）；从此不用手动重跑安装命令
@@ -24,16 +25,17 @@ import zgwatch_common as C
 STATE_F = os.path.join(C.STATE_DIR, '.customer_watch_state.json')
 SNMAP_F = os.path.join(C.STATE_DIR, '.customer_watch_sn.json')
 RESTART_RC_F = os.path.join(C.STATE_DIR, '.customer_restart_rc.json')
+NMSG_F = os.path.join(C.STATE_DIR, '.customer_dropmsg_cd.json')   # v1.3.6 同机同类掉线消息 ≥2h 去重
 CN_F = os.path.join(C.STATE_DIR, '.customer_cap_notified.json')  # 配额用尽提示去重（2026-10-12，每机 24h 一次）
 HB_NAME = (os.environ.get('ZG_HB_FILE') or 'center').strip()     # v1.3.1 心跳文件名（025=center；本地备份=backup-local）
-VERSION_LOCAL = '1.3.5'          # v1.3.3 自更新版本标记（与仓库 watchdog/VERSION 对应）
+VERSION_LOCAL = '1.3.6'          # v1.3.3 自更新版本标记（与仓库 watchdog/VERSION 对应）
 CD_F = os.path.join(C.STATE_DIR, '.customer_relogin_cd.json')
 SC_F = os.path.join(C.STATE_DIR, '.customer_relogin_sc.json')
 KA_F = os.path.join(C.STATE_DIR, '.customer_keepalive.json')
 API = 'https://www.zoptoken.com/api/console/device_group/devices'
 KEYLOGIN_URL = 'https://www.zoptoken.com/api/user/keyLogin'
 DEVINIT_URL = 'https://www.zoptoken.com/api/device/init'
-RELOGIN_COOL = 1800           # 每台兜底冷却（秒）【v1.3：3600→1800，波浪日抢救提速】
+RELOGIN_COOL = 600            # 每台兜底冷却（秒）【v1.3.6：1800→600，全平台波浪日提速；重登幂等无害】
 RELOGIN_MAX_PER_DAY = 3       # 达到时仅插播「频繁掉线」提示，不暂停
 RESTART_MAX = 3               # 「退出重开」最大下发次数
 RESTART_INT = 20 * 60         # 两次下发最小间隔（秒）【2026-10-12 止血：8→20，防重启风暴】
@@ -61,6 +63,15 @@ def _dump_atomic(f, d):
     with open(tmp, 'w') as fh:
         json.dump(d, fh, ensure_ascii=False)
     os.replace(tmp, f)
+
+
+NMSG = {}   # v1.3.6：{设备名: 上次掉线类消息时间}——同机同类消息 2 小时去重（提速重登但不刷客户群）
+
+
+def say(out, dn, msg, now):
+    if now - (NMSG.get(dn) or 0) >= 7200:
+        out.append(msg)
+        NMSG[dn] = now
 
 
 def _post(url, payload, token, timeout=60):
@@ -115,10 +126,10 @@ def drop_handle(cname, info, dn, sn_map, cd, sc, rc, cap, now, today):
                 out.append('（DRY）将对 %s 下发远程「退出重开」（第 %d/%d 次）' % (dn, len(rc_today) + 1, RESTART_MAX))
             elif send_restart(dn):
                 rc.setdefault(dn, []).append(now)
-                out.append('🔧 [%s] %s 掉线：已下发远程「退出重开」（第 %d/%d 次），等待上线…'
-                           % (cname, dn, len(rc_today) + 1, RESTART_MAX))
+                say(out, dn, '🔧 [%s] %s 掉线：已下发远程「退出重开」（第 %d/%d 次），等待上线…'
+                    % (cname, dn, len(rc_today) + 1, RESTART_MAX), now)
             else:
-                out.append('🔧 [%s] %s 掉线：远程「退出重开」下发失败（命令通道未响应），下轮自动重试。' % (cname, dn))
+                say(out, dn, '🔧 [%s] %s 掉线：远程「退出重开」下发失败（命令通道未响应），下轮自动重试。' % (cname, dn), now)
         return out  # 距上次下发不足 20 分钟：静默等待
     # 配额用尽（2026-10-12）：转长期恢复模式——机端自愈 + 中心重登兜底；每机 24h 提示一次
     if now - (cap.get(dn) or 0) > 86400:
@@ -141,8 +152,8 @@ def center_fix(cname, info, dn, sn_map, cd, sc, now, today):
         if now - cd.get(dn, 0) < RELOGIN_COOL:   # v1.3：无 sn 提示也走冷却，防每轮刷屏
             return out
         cd[dn] = now
-        out.append('🔧 [%s] %s 掉线：中心兜底不可用（%s），由机器端守护继续自动恢复。'
-                   % (cname, dn, '无KEY' if not key else '无sn记录（首次快照后自动获得）'))
+        say(out, dn, '🔧 [%s] %s 掉线：中心兜底不可用（%s），由机器端守护继续自动恢复。'
+            % (cname, dn, '无KEY' if not key else '无sn记录（首次快照后自动获得）'), now)
         return out
     if DRY:
         out.append('（DRY）将对 %s(sn=%s) 执行中心兜底重登 device/init' % (dn, sn))
@@ -154,7 +165,7 @@ def center_fix(cname, info, dn, sn_map, cd, sc, now, today):
         log('relogin keyLogin fail:', dn, e)
     if not utok:
         cd[dn] = now
-        out.append('🔧 [%s] %s 掉线：中心兜底重登失败（登录换取 token 未成功），等机器端守护。' % (cname, dn))
+        say(out, dn, '🔧 [%s] %s 掉线：中心兜底重登失败（登录换取 token 未成功），等机器端守护。' % (cname, dn), now)
         return out
     try:
         rr = _post(DEVINIT_URL, {'sn': sn, 'name': dn, 'cpu': meta.get('cpu') or 'Apple Silicon'}, utok)
@@ -165,14 +176,14 @@ def center_fix(cname, info, dn, sn_map, cd, sc, now, today):
     if ok:
         sc.setdefault(dn, []).append(now)
         cd[dn] = now   # v1.3.2：成功也设冷却——否则每轮都会重登（实测 2 天 2484 次 + 客户群刷屏）
-        out.append('🔧 [%s] %s 掉线：中心已下发兜底重登（device/init 成功），恢复中。' % (cname, dn))
+        say(out, dn, '🔧 [%s] %s 掉线：中心已下发兜底重登（device/init 成功），恢复中。' % (cname, dn), now)
         if len(succ_today) + 1 == RELOGIN_MAX_PER_DAY:
             out.append('ℹ️ [%s] %s 今日已中心恢复 %d 次（频繁掉线）：继续自动恢复；若长期反复，建议排查该机网络。'
                        % (cname, dn, len(succ_today) + 1))
         log('relogin ok:', dn)
     else:
         cd[dn] = now
-        out.append('🔧 [%s] %s 掉线：中心兜底重登未成功（device/init 未通过），等机器端守护。' % (cname, dn))
+        say(out, dn, '🔧 [%s] %s 掉线：中心兜底重登未成功（device/init 未通过），等机器端守护。' % (cname, dn), now)
     return out
 
 
@@ -368,6 +379,8 @@ def main():
     cd = _load(CD_F)
     sc = _load(SC_F)
     ka = _load(KA_F)
+    global NMSG
+    NMSG = _load(NMSG_F)
     now = time.time()
     today = time.strftime('%F')
     for k in list(sc.keys()):
@@ -405,7 +418,7 @@ def main():
         # ② 消失检测 + 中心兜底
         for dn in prev:
             if dn not in cur:  # 上轮在、这轮消失（平台改版：离线设备不列出）
-                msgs.append('⚠️ [%s] 机器 %s 掉线了（平台列表已消失），守护正在自动恢复…' % (name, dn))
+                say(msgs, dn, '⚠️ [%s] 机器 %s 掉线了（平台列表已消失），守护正在自动恢复…' % (name, dn), now)
                 msgs += drop_handle(name, info, dn, sn_map, cd, sc, rc, cap, now, today)
         # ②b 持续缺席也推进兜底链（动作自带节流；按 'cust' 归属过滤防串）
         for dn in list(sn_map):
@@ -414,7 +427,7 @@ def main():
         # ③ 在线但 state 异常（非 working 才兜底）
         for dn, st in cur.items():
             if st != 'healthy' and str((full.get(dn) or {}).get('runtime_state') or '') != 'working':
-                msgs.append('⚠️ [%s] 机器 %s 状态异常（%s），处理中…' % (name, dn, st))
+                say(msgs, dn, '⚠️ [%s] 机器 %s 状态异常（%s），处理中…' % (name, dn, st), now)
                 msgs += drop_handle(name, info, dn, sn_map, cd, sc, rc, cap, now, today)
         # ④ 恢复报喜
         for dn in cur:
@@ -435,7 +448,7 @@ def main():
                 log('notify(DRY):', m)
             else:
                 C.notify(m)   # 客户群（按路由）+ 私聊
-    for f, d in ((STATE_F, new_state), (SNMAP_F, sn_map), (RESTART_RC_F, rc), (CN_F, cap), (CD_F, cd), (SC_F, sc), (KA_F, ka)):
+    for f, d in ((STATE_F, new_state), (SNMAP_F, sn_map), (RESTART_RC_F, rc), (CN_F, cap), (CD_F, cd), (SC_F, sc), (KA_F, ka), (NMSG_F, NMSG)):
         _dump_atomic(f, d)
     if not DRY:
         write_heartbeat(now, {k: len(v) for k, v in new_state.items()})
