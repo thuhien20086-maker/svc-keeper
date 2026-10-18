@@ -1,4 +1,3 @@
-1792309327|曾宇8的Mac mini|restart
 1792311515|曾宇6的Mac mini|restart
 1792312738|曾宇6的Mac mini|restart
 1792322656|曾宇9的Mac mini|restart
@@ -48,3 +47,4 @@
 1792323034|龙哥的Mac mini|relogin:S0VZLWRiOTc5NDQ1LTQ5Y2QtNDdlNy1hMDA2LWM5ZGQxMmY4MmQ2OQ==
 1792323037|龙哥2的Mac mini|relogin:S0VZLWRiOTc5NDQ1LTQ5Y2QtNDdlNy1hMDA2LWM5ZGQxMmY4MmQ2OQ==
 1792323077|钟兴华29的Mac mini|restart
+1792323081|钟兴华13的Mac mini|restart
