@@ -1,6 +1,6 @@
 #!/bin/bash
 # 客户端自愈守护（通用版）
-# zopguard-version: 2.3
+# zopguard-version: 2.4
 # 每 3 分钟由 launchd 调用：
 #   · 检测客户端进程，异常时自动「退出→重开」
 #   · v1.2 平台判据：进程活着但平台侧状态异常（假活/掉线）也会自动修复
@@ -198,7 +198,7 @@ check_remote_cmd() {
     fi
     [ "$ts" -le "$last" ] 2>/dev/null && continue
     if [ "$target" = "all" ] || [ "$target" = "$MACHINE_NAME" ] || { [ -n "$MACHINE_ID" ] && [ "$target" = "$MACHINE_ID" ]; }; then  # v2.1：真名或代号双认
-      case "$action" in ping|diag|restart|relogin|update|reboot|renew) ;; *) log "remote-cmd: 未知动作 '$action'（ts=$ts）已忽略"; continue ;; esac
+      case "$action" in ping|diag|restart|relogin|update|reboot|renew|relogin:*) ;; *) log "remote-cmd: 未知动作 '$action'（ts=$ts）已忽略"; continue ;; esac
       sput CMD_TS "$ts"; last=$ts                # 执行前记账（reboot/update 会终止本进程，防重复执行）
       exec_remote_action "$action" "$rpl" "$rsg"
     fi
@@ -238,6 +238,25 @@ ${_dl}"
         notify "✅ [$MACHINE_NAME] 看板指令 restart 完成：客户端已重启$([ "$rl" = "0" ] && echo '，平台槽位已恢复')（$t0）"
       else
         notify "⚠️ [$MACHINE_NAME] 看板指令 restart：客户端重启后 30 秒未检测到进程，请关注（$t0）"
+      fi
+      ;;
+    relogin:*)
+      # v2.4：中心下发登录密钥——写入 config.sh 并立即直登（成功静默，失败才回传）
+      _k=$(printf '%s' "${action#relogin:}" | openssl base64 -d -A 2>/dev/null)
+      if [ "${_k#KEY-}" != "$_k" ] && [ ${#_k} -ge 20 ]; then
+        grep -v '^ZOPT_LOGIN_KEY=' "$CFG" > "$CFG.tmp.$$" 2>/dev/null
+        printf "ZOPT_LOGIN_KEY='%s'\n" "$_k" >> "$CFG.tmp.$$"
+        chmod 600 "$CFG.tmp.$$" 2>/dev/null
+        mv "$CFG.tmp.$$" "$CFG"
+        ZOPT_LOGIN_KEY="$_k"
+        log "remote-cmd: 已写入 ZOPT_LOGIN_KEY（长度 ${#_k}，v$ver）"
+        if api_relogin; then
+          log "remote-cmd: setkey 后 api_relogin ok"
+        else
+          notify "⚠️ [$MACHINE_NAME] 登录凭据已更新，但 API 直登未成功（平台异常时重启会再试）（$t0）"
+        fi
+      else
+        notify "⚠️ [$MACHINE_NAME] 收到的登录凭据格式无效，已忽略（$t0）"
       fi
       ;;
     relogin)
