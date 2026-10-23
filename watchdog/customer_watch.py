@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # customer_watch.py —— 客户机中心观察器 + 中心兜底（观察台版，2026-10-08 起）
+# v1.3.8（2026-10-23）：keepalive 彻底关闭——它内部也在调 device/init（每机 25 分钟一次），这才是“重复注册→整组清空”的真凶（v1.3.7 只关了 center_fix，漏了它）
 # v1.3.7（2026-10-23）：中心 device/init 重登默认关闭（ZG_CENTER_RELOGIN=1 才开）——怀疑顶格配额下重复注册触发平台整组清空；掉线改由机器端自愈
 # v1.3.6（2026-10-18）：重登冷却 1800→600（波浪日提速）+ 掉线类消息同机 2h 去重（快救但不刷群）
 # v1.3.5（2026-10-17）：名册固化——安装/自更新带 roster.json（32台），即使状态被清空也能识别"消失的机器"；auto_update 同时刷新 roster
@@ -29,7 +30,7 @@ RESTART_RC_F = os.path.join(C.STATE_DIR, '.customer_restart_rc.json')
 NMSG_F = os.path.join(C.STATE_DIR, '.customer_dropmsg_cd.json')   # v1.3.6 同机同类掉线消息 ≥2h 去重
 CN_F = os.path.join(C.STATE_DIR, '.customer_cap_notified.json')  # 配额用尽提示去重（2026-10-12，每机 24h 一次）
 HB_NAME = (os.environ.get('ZG_HB_FILE') or 'center').strip()     # v1.3.1 心跳文件名（025=center；本地备份=backup-local）
-VERSION_LOCAL = '1.3.7'          # v1.3.3 自更新版本标记（与仓库 watchdog/VERSION 对应）
+VERSION_LOCAL = '1.3.8'          # v1.3.3 自更新版本标记（与仓库 watchdog/VERSION 对应）
 CD_F = os.path.join(C.STATE_DIR, '.customer_relogin_cd.json')
 SC_F = os.path.join(C.STATE_DIR, '.customer_relogin_sc.json')
 KA_F = os.path.join(C.STATE_DIR, '.customer_keepalive.json')
@@ -302,6 +303,7 @@ def write_heartbeat(now, counts):
 
 def keepalive(cname, info, lst, ka, now):
     """对 idle+healthy 设备保活（25 分钟/台）；working 不碰；静默（只 log）。"""
+    return   # v1.3.8：保活内部调 device/init（重复注册疑为整组清空真凶）——停用；需要时 ZG_KEEPALIVE=1 再开
     key = info.get('key') or ''
     if not key:
         return
