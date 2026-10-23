@@ -1,6 +1,6 @@
 #!/bin/bash
 # 客户端自愈守护（通用版）
-# zopguard-version: 2.4
+# zopguard-version: 2.5
 # 每 3 分钟由 launchd 调用：
 #   · 检测客户端进程，异常时自动「退出→重开」
 #   · v1.2 平台判据：进程活着但平台侧状态异常（假活/掉线）也会自动修复
@@ -538,6 +538,22 @@ sentry_run() {
 }
 
 # ---------- v1.6：自更新（每轮顺带查一次 VERSION，有新版本自动下载→校验→替换→重启） ----------
+# ---------- v2.5（2026-10-23，借鉴第三方守护工具）：日志治理 ----------
+housekeep_log() {
+  local lf="$LOG" max="${LOG_MAX_LINES:-2000}" ts last
+  [ -f "$lf" ] || return 0
+  last=$(date +%s)
+  local lkf="$STATE_DIR/.housekeep_ts"
+  if [ -f "$lkf" ]; then last=$(cat "$lkf" 2>/dev/null || echo 0); fi
+  [ $(( $(date +%s) - last )) -lt 21600 ] && return 0
+  echo "$(date +%s)" > "$lkf" 2>/dev/null
+  local n; n=$(wc -l < "$lf" 2>/dev/null | tr -d ' ')
+  if [ "${n:-0}" -gt "$max" ]; then
+    tail -n "$max" "$lf" > "$lf.tmp.$$" 2>/dev/null && mv "$lf.tmp.$$" "$lf"
+    log "housekeep: 日志裁剪 $n -> $max 行"
+  fi
+}
+
 auto_update() {
   [ -z "$AUTO_UPDATE_URL" ] && return 0
   local base="${AUTO_UPDATE_URL%/guard.sh}"
@@ -915,6 +931,7 @@ check_and_repair() {
   fi
   # v1.17：自更新与远程命令无条件执行（旧逻辑只在健康分支跑——坏机器永远收不到新版和一键重启）
   auto_update
+  housekeep_log   # v2.5：日志治理（6h 节流，>2000 行裁剪）
   check_remote_cmd
   now=$(date +%s)
   today=$(date +%F)
