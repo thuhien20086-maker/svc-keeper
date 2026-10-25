@@ -1,4 +1,3 @@
-1792944370|钟兴华15的Mac mini|restart
 1792944372|钟兴华025的Mac mini|restart
 1792944381|钟兴华12的Mac mini|restart
 1792944385|钟兴华025的Mac mini|restart
@@ -48,3 +47,4 @@
 1792945517|钟兴华11的Mac mini|restart
 1792945525|钟兴华16的Mac mini|restart
 1792945532|钟兴华05的Mac mini|restart
+1792945535|钟兴华29的Mac mini|restart
