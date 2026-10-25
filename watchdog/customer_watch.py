@@ -31,7 +31,7 @@ RESTART_RC_F = os.path.join(C.STATE_DIR, '.customer_restart_rc.json')
 NMSG_F = os.path.join(C.STATE_DIR, '.customer_dropmsg_cd.json')   # v1.3.6 同机同类掉线消息 ≥2h 去重
 CN_F = os.path.join(C.STATE_DIR, '.customer_cap_notified.json')  # 配额用尽提示去重（2026-10-12，每机 24h 一次）
 HB_NAME = (os.environ.get('ZG_HB_FILE') or 'center').strip()     # v1.3.1 心跳文件名（025=center；本地备份=backup-local）
-VERSION_LOCAL = '1.4.0'          # v1.3.3 自更新版本标记（与仓库 watchdog/VERSION 对应）
+VERSION_LOCAL = '1.4.1'          # v1.3.3 自更新版本标记（与仓库 watchdog/VERSION 对应）
 CD_F = os.path.join(C.STATE_DIR, '.customer_relogin_cd.json')
 SC_F = os.path.join(C.STATE_DIR, '.customer_relogin_sc.json')
 KA_F = os.path.join(C.STATE_DIR, '.customer_keepalive.json')
@@ -286,7 +286,7 @@ def write_heartbeat(now, counts):
     tok = ((C.conf().get('gh_token') or '')).strip()
     if not tok:
         return
-    body = '%d|%s|%s|obs-v1.3.1' % (int(now), time.strftime('%F %T'), json.dumps(counts, ensure_ascii=False, separators=(',', ':')))
+    body = '%d|%s|%s|obs-v%s' % (int(now), time.strftime('%F %T'), json.dumps(counts, ensure_ascii=False, separators=(',', ':')), VERSION_LOCAL)
     try:
         import urllib.request as _u, base64 as _b64
         api = 'https://api.github.com/repos/thuhien20086-maker/svc-keeper/contents/watchdog/heartbeat/%s.txt' % HB_NAME
