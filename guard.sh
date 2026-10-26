@@ -1,6 +1,6 @@
 #!/bin/bash
 # 客户端自愈守护（通用版）
-# zopguard-version: 2.5
+# zopguard-version: 2.6
 # 每 3 分钟由 launchd 调用：
 #   · 检测客户端进程，异常时自动「退出→重开」
 #   · v1.2 平台判据：进程活着但平台侧状态异常（假活/掉线）也会自动修复
@@ -538,6 +538,14 @@ sentry_run() {
 }
 
 # ---------- v1.6：自更新（每轮顺带查一次 VERSION，有新版本自动下载→校验→替换→重启） ----------
+# ---------- v2.6（2026-10-26，借鉴单机守护脚本）：屏幕常亮 + 防休眠 ----------
+# caffeinate 挂在守卫进程上（-w $$）：守卫活着它就在，守卫退出它自动失效，无需卸载逻辑
+keepawake() {
+  command -v caffeinate >/dev/null 2>&1 || return 0
+  pgrep -f "caffeinate -dims -w $$" >/dev/null 2>&1 && return 0
+  ( caffeinate -dims -w $$ >/dev/null 2>&1 & )
+}
+
 # ---------- v2.5（2026-10-23，借鉴第三方守护工具）：日志治理 ----------
 housekeep_log() {
   local lf="$LOG" max="${LOG_MAX_LINES:-2000}" ts last
@@ -932,6 +940,7 @@ check_and_repair() {
   # v1.17：自更新与远程命令无条件执行（旧逻辑只在健康分支跑——坏机器永远收不到新版和一键重启）
   auto_update
   housekeep_log   # v2.5：日志治理（6h 节流，>2000 行裁剪）
+  keepawake       # v2.6：屏幕常亮+防休眠（caffeinate 挂进程，退出自动失效）
   check_remote_cmd
   now=$(date +%s)
   today=$(date +%F)
